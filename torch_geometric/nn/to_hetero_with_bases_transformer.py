@@ -1,21 +1,20 @@
-from typing import List, Dict, Union, Optional, Any
-from torch_geometric.typing import NodeType, EdgeType, Metadata
-
 import copy
 import warnings
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch import Tensor
 from torch.nn import Module, Parameter
-from torch_sparse import SparseTensor
 
-from torch_geometric.nn.fx import Transformer
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense import Linear
+from torch_geometric.nn.fx import Transformer
+from torch_geometric.typing import EdgeType, Metadata, NodeType, SparseTensor
+from torch_geometric.utils.hetero import get_unused_node_types
 
 try:
-    from torch.fx import GraphModule, Graph, Node
-except ImportError:
+    from torch.fx import Graph, GraphModule, Node
+except (ImportError, ModuleNotFoundError, AttributeError):
     GraphModule, Graph, Node = 'GraphModule', 'Graph', 'Node'
 
 
@@ -26,7 +25,8 @@ def to_hetero_with_bases(module: Module, metadata: Metadata, num_bases: int,
     r"""Converts a homogeneous GNN model into its heterogeneous equivalent
     via the basis-decomposition technique introduced in the
     `"Modeling Relational Data with Graph Convolutional Networks"
-    <https://arxiv.org/abs/1703.06103>`_ paper:
+    <https://arxiv.org/abs/1703.06103>`_ paper.
+
     For this, the heterogeneous graph is mapped to a typed homogeneous graph,
     in which its feature representations are aligned and grouped to a single
     representation.
@@ -43,6 +43,7 @@ def to_hetero_with_bases(module: Module, metadata: Metadata, num_bases: int,
 
         class GNN(torch.nn.Module):
             def __init__(self):
+                super().__init__()
                 self.conv1 = SAGEConv((16, 16), 32)
                 self.conv2 = SAGEConv((32, 32), 32)
 
@@ -56,7 +57,7 @@ def to_hetero_with_bases(module: Module, metadata: Metadata, num_bases: int,
         node_types = ['paper', 'author']
         edge_types = [
             ('paper', 'cites', 'paper'),
-            ('paper' 'written_by', 'author'),
+            ('paper', 'written_by', 'author'),
             ('author', 'writes', 'paper'),
         ]
         metadata = (node_types, edge_types)
@@ -125,7 +126,7 @@ def to_hetero_with_bases(module: Module, metadata: Metadata, num_bases: int,
             In case :obj:`input_map` is not further specified, will try to
             automatically determine the correct type of input arguments.
             (default: :obj:`None`)
-        debug: (bool, optional): If set to :obj:`True`, will perform
+        debug (bool, optional): If set to :obj:`True`, will perform
             transformation in debug mode. (default: :obj:`False`)
     """
     transformer = ToHeteroWithBasesTransformer(module, metadata, num_bases,
@@ -144,15 +145,36 @@ class ToHeteroWithBasesTransformer(Transformer):
         debug: bool = False,
     ):
         super().__init__(module, input_map, debug)
+
         self.metadata = metadata
         self.num_bases = num_bases
         self.in_channels = in_channels or {}
         assert len(metadata) == 2
         assert len(metadata[0]) > 0 and len(metadata[1]) > 0
 
+        self.validate()
+
         # Compute IDs for each node and edge type:
         self.node_type2id = {k: i for i, k in enumerate(metadata[0])}
         self.edge_type2id = {k: i for i, k in enumerate(metadata[1])}
+
+    def validate(self):
+        unused_node_types = get_unused_node_types(*self.metadata)
+        if len(unused_node_types) > 0:
+            warnings.warn(
+                f"There exist node types ({unused_node_types}) whose "
+                f"representations do not get updated during message passing "
+                f"as they do not occur as destination type in any edge type. "
+                f"This may lead to unexpected behavior.")
+
+        names = self.metadata[0] + [rel for _, rel, _ in self.metadata[1]]
+        for name in names:
+            if not name.isidentifier():
+                warnings.warn(
+                    f"The type '{name}' contains invalid characters which "
+                    f"may lead to unexpected behavior. To avoid any issues, "
+                    f"ensure that your types only contain letters, numbers "
+                    f"and underscores.")
 
     def transform(self) -> GraphModule:
         self._node_offset_dict_initialized = False
@@ -250,7 +272,6 @@ class ToHeteroWithBasesTransformer(Transformer):
                     args=(value, self.find_by_name('edge_offset_dict')),
                     name=f'{value.name}__split')
 
-                pass
             elif isinstance(value, Node):
                 self.graph.inserting_before(node)
                 return self.graph.create_node(
@@ -287,6 +308,24 @@ class ToHeteroWithBasesTransformer(Transformer):
 ###############################################################################
 
 
+# We make use of a post-message computation hook to inject the
+# basis re-weighting for each individual edge type.
+# This currently requires us to set `conv.fuse = False`, which leads
+# to a materialization of messages.
+def hook(module, inputs, output):
+    assert isinstance(module._edge_type, Tensor)
+    if module._edge_type.size(0) != output.size(-2):
+        raise ValueError(
+            f"Number of messages ({output.size(0)}) does not match "
+            f"with the number of original edges "
+            f"({module._edge_type.size(0)}). Does your message "
+            f"passing layer create additional self-loops? Try to "
+            f"remove them via 'add_self_loops=False'")
+    weight = module.edge_type_weight.view(-1)[module._edge_type]
+    weight = weight.view([1] * (output.dim() - 2) + [-1, 1])
+    return weight * output
+
+
 class HeteroBasisConv(torch.nn.Module):
     # A wrapper layer that applies the basis-decomposition technique to a
     # heterogeneous graph.
@@ -296,23 +335,6 @@ class HeteroBasisConv(torch.nn.Module):
 
         self.num_relations = num_relations
         self.num_bases = num_bases
-
-        # We make use of a post-message computation hook to inject the
-        # basis re-weighting for each individual edge type.
-        # This currently requires us to set `conv.fuse = False`, which leads
-        # to a materialization of messages.
-        def hook(module, inputs, output):
-            assert isinstance(module._edge_type, Tensor)
-            if module._edge_type.size(0) != output.size(0):
-                raise ValueError(
-                    f"Number of messages ({output.size(0)}) does not match "
-                    f"with the number of original edges "
-                    f"({module._edge_type.size(0)}). Does your message "
-                    f"passing layer create additional self-loops? Try to "
-                    f"remove them via 'add_self_loops=False'")
-            weight = module.edge_type_weight.view(-1)[module._edge_type]
-            weight = weight.view([-1] + [1] * (output.dim() - 1))
-            return weight * output
 
         params = list(module.parameters())
         device = params[0].device if len(params) > 0 else 'cpu'
@@ -324,7 +346,7 @@ class HeteroBasisConv(torch.nn.Module):
             # We learn a single scalar weight for each individual edge type,
             # which is used to weight the output message based on edge type:
             conv.edge_type_weight = Parameter(
-                torch.Tensor(1, num_relations, device=device))
+                torch.empty(1, num_relations, device=device))
             conv.register_message_forward_hook(hook)
             self.convs.append(conv)
 
@@ -372,10 +394,7 @@ class LinearAlign(torch.nn.Module):
     def forward(
         self, x_dict: Dict[Union[NodeType, EdgeType], Tensor]
     ) -> Dict[Union[NodeType, EdgeType], Tensor]:
-
-        for key, x in x_dict.items():
-            x_dict[key] = self.lins[key2str(key)](x)
-        return x_dict
+        return {key: self.lins[key2str(key)](x) for key, x in x_dict.items()}
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}(num_relations={len(self.lins)}, '
@@ -393,12 +412,11 @@ def get_node_offset_dict(
     input_dict: Dict[NodeType, Union[Tensor, SparseTensor]],
     type2id: Dict[NodeType, int],
 ) -> Dict[NodeType, int]:
-
     cumsum = 0
     out: Dict[NodeType, int] = {}
     for key in type2id.keys():
         out[key] = cumsum
-        cumsum += input_dict[key].size(0)
+        cumsum += input_dict[key].size(-2)
     return out
 
 
@@ -406,7 +424,6 @@ def get_edge_offset_dict(
     input_dict: Dict[EdgeType, Union[Tensor, SparseTensor]],
     type2id: Dict[EdgeType, int],
 ) -> Dict[EdgeType, int]:
-
     cumsum = 0
     out: Dict[EdgeType, int] = {}
     for key in type2id.keys():
@@ -417,7 +434,7 @@ def get_edge_offset_dict(
         elif value.dtype == torch.long and value.size(0) == 2:
             cumsum += value.size(-1)
         else:
-            cumsum += value.size(0)
+            cumsum += value.size(-2)
     return out
 
 
@@ -442,7 +459,7 @@ def get_edge_type(
             out = torch.full((value.nnz(), ), i, dtype=torch.long,
                              device=value.device())
         else:
-            out = value.new_full((value.size(0), ), i, dtype=torch.long)
+            out = value.new_full((value.size(-2), ), i, dtype=torch.long)
         outs.append(out)
 
     return outs[0] if len(outs) == 1 else torch.cat(outs, dim=0)
@@ -451,14 +468,14 @@ def get_edge_type(
 ###############################################################################
 
 # These methods are used to group the individual type-wise components into a
-# unfied single representation.
+# unified single representation.
 
 
 def group_node_placeholder(input_dict: Dict[NodeType, Tensor],
                            type2id: Dict[NodeType, int]) -> Tensor:
 
     inputs = [input_dict[key] for key in type2id.keys()]
-    return inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=0)
+    return inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
 
 
 def group_edge_placeholder(
@@ -512,7 +529,7 @@ def group_edge_placeholder(
         return torch.stack([row, col], dim=0)
 
     else:
-        return torch.cat(inputs, dim=0)
+        return torch.cat(inputs, dim=-2)
 
 
 ###############################################################################
@@ -526,9 +543,9 @@ def split_output(
     offset_dict: Union[Dict[NodeType, int], Dict[EdgeType, int]],
 ) -> Union[Dict[NodeType, Tensor], Dict[EdgeType, Tensor]]:
 
-    cumsums = list(offset_dict.values()) + [output.size(0)]
+    cumsums = list(offset_dict.values()) + [output.size(-2)]
     sizes = [cumsums[i + 1] - cumsums[i] for i in range(len(offset_dict))]
-    outputs = output.split(sizes)
+    outputs = output.split(sizes, dim=-2)
     return {key: output for key, output in zip(offset_dict, outputs)}
 
 
@@ -536,4 +553,5 @@ def split_output(
 
 
 def key2str(key: Union[NodeType, EdgeType]) -> str:
-    return '__'.join(key) if isinstance(key, tuple) else key
+    key = '__'.join(key) if isinstance(key, tuple) else key
+    return key.replace(' ', '_').replace('-', '_').replace(':', '_')

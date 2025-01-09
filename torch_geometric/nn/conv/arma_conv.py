@@ -1,21 +1,21 @@
 from typing import Callable, Optional
-from torch_geometric.typing import Adj, OptTensor
 
 import torch
-from torch import nn
-from torch import Tensor
-from torch.nn import Parameter, ReLU
 import torch.nn.functional as F
-from torch_sparse import SparseTensor, matmul
+from torch import Tensor, nn
+from torch.nn import Parameter, ReLU
+
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
-
-from ..inits import glorot, zeros
+from torch_geometric.nn.inits import glorot, zeros
+from torch_geometric.typing import Adj, OptTensor, SparseTensor
+from torch_geometric.utils import spmm
 
 
 class ARMAConv(MessagePassing):
     r"""The ARMA graph convolutional operator from the `"Graph Neural Networks
-    with Convolutional ARMA Filters" <https://arxiv.org/abs/1901.01343>`_ paper
+    with Convolutional ARMA Filters" <https://arxiv.org/abs/1901.01343>`_
+    paper.
 
     .. math::
         \mathbf{X}^{\prime} = \frac{1}{K} \sum_{k=1}^K \mathbf{X}_k^{(T)},
@@ -50,6 +50,13 @@ class ARMAConv(MessagePassing):
             an additive bias. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})`,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge weights :math:`(|\mathcal{E}|)` *(optional)*
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})`
     """
     def __init__(self, in_channels: int, out_channels: int,
                  num_stacks: int = 1, num_layers: int = 1,
@@ -57,7 +64,7 @@ class ARMAConv(MessagePassing):
                  act: Optional[Callable] = ReLU(), dropout: float = 0.,
                  bias: bool = True, **kwargs):
         kwargs.setdefault('aggr', 'add')
-        super(ARMAConv, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -70,10 +77,10 @@ class ARMAConv(MessagePassing):
         K, T, F_in, F_out = num_stacks, num_layers, in_channels, out_channels
         T = 1 if self.shared_weights else T
 
-        self.weight = Parameter(torch.Tensor(max(1, T - 1), K, F_out, F_out))
+        self.weight = Parameter(torch.empty(max(1, T - 1), K, F_out, F_out))
         if in_channels > 0:
-            self.init_weight = Parameter(torch.Tensor(K, F_in, F_out))
-            self.root_weight = Parameter(torch.Tensor(T, K, F_in, F_out))
+            self.init_weight = Parameter(torch.empty(K, F_in, F_out))
+            self.root_weight = Parameter(torch.empty(T, K, F_in, F_out))
         else:
             self.init_weight = torch.nn.parameter.UninitializedParameter()
             self.root_weight = torch.nn.parameter.UninitializedParameter()
@@ -81,13 +88,14 @@ class ARMAConv(MessagePassing):
                 self.initialize_parameters)
 
         if bias:
-            self.bias = Parameter(torch.Tensor(T, K, 1, F_out))
+            self.bias = Parameter(torch.empty(T, K, 1, F_out))
         else:
             self.register_parameter('bias', None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         glorot(self.weight)
         if not isinstance(self.init_weight, torch.nn.UninitializedParameter):
             glorot(self.init_weight)
@@ -96,17 +104,16 @@ class ARMAConv(MessagePassing):
 
     def forward(self, x: Tensor, edge_index: Adj,
                 edge_weight: OptTensor = None) -> Tensor:
-        """"""
 
         if isinstance(edge_index, Tensor):
             edge_index, edge_weight = gcn_norm(  # yapf: disable
                 edge_index, edge_weight, x.size(self.node_dim),
-                add_self_loops=False, dtype=x.dtype)
+                add_self_loops=False, flow=self.flow, dtype=x.dtype)
 
         elif isinstance(edge_index, SparseTensor):
             edge_index = gcn_norm(  # yapf: disable
                 edge_index, edge_weight, x.size(self.node_dim),
-                add_self_loops=False, dtype=x.dtype)
+                add_self_loops=False, flow=self.flow, dtype=x.dtype)
 
         x = x.unsqueeze(-3)
         out = x
@@ -117,14 +124,14 @@ class ARMAConv(MessagePassing):
                 out = out @ self.weight[0 if self.shared_weights else t - 1]
 
             # propagate_type: (x: Tensor, edge_weight: OptTensor)
-            out = self.propagate(edge_index, x=out, edge_weight=edge_weight,
-                                 size=None)
+            out = self.propagate(edge_index, x=out, edge_weight=edge_weight)
 
             root = F.dropout(x, p=self.dropout, training=self.training)
-            out += root @ self.root_weight[0 if self.shared_weights else t]
+            root = root @ self.root_weight[0 if self.shared_weights else t]
+            out = out + root
 
             if self.bias is not None:
-                out += self.bias[0 if self.shared_weights else t]
+                out = out + self.bias[0 if self.shared_weights else t]
 
             if self.act is not None:
                 out = self.act(out)
@@ -134,8 +141,8 @@ class ARMAConv(MessagePassing):
     def message(self, x_j: Tensor, edge_weight: Tensor) -> Tensor:
         return edge_weight.view(-1, 1) * x_j
 
-    def message_and_aggregate(self, adj_t: SparseTensor, x: Tensor) -> Tensor:
-        return matmul(adj_t, x, reduce=self.aggr)
+    def message_and_aggregate(self, adj_t: Adj, x: Tensor) -> Tensor:
+        return spmm(adj_t, x, reduce=self.aggr)
 
     @torch.no_grad()
     def initialize_parameters(self, module, input):
@@ -151,6 +158,6 @@ class ARMAConv(MessagePassing):
         delattr(module, '_hook')
 
     def __repr__(self) -> str:
-        return '{}({}, {}, num_stacks={}, num_layers={})'.format(
-            self.__class__.__name__, self.in_channels, self.out_channels,
-            self.num_stacks, self.num_layers)
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, num_stacks={self.num_stacks}, '
+                f'num_layers={self.num_layers})')

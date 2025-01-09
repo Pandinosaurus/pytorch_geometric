@@ -3,16 +3,23 @@ from typing import Optional
 
 import torch
 from torch import Tensor
-from torch_sparse import SparseTensor
-from torch_geometric.data import Data, Batch
+
+from torch_geometric.data import Batch, Data
+from torch_geometric.typing import WITH_TORCH_SPARSE, SparseTensor
 
 
 class ShaDowKHopSampler(torch.utils.data.DataLoader):
-    r"""The ShaDow :math:`k`-hop sampler from the `"Deep Graph Neural Networks
-    with Shallow Subgraph Samplers" <https://arxiv.org/abs/2012.01380>`_ paper.
+    r"""The ShaDow :math:`k`-hop sampler from the `"Decoupling the Depth and
+    Scope of Graph Neural Networks" <https://arxiv.org/abs/2201.07858>`_ paper.
     Given a graph in a :obj:`data` object, the sampler will create shallow,
     localized subgraphs.
     A deep GNN on this local graph then smooths the informative local signals.
+
+    .. note::
+
+        For an example of using :class:`ShaDowKHopSampler`, see
+        `examples/shadow.py <https://github.com/pyg-team/
+        pytorch_geometric/blob/master/examples/shadow.py>`_.
 
     Args:
         data (torch_geometric.data.Data): The graph data object.
@@ -32,6 +39,10 @@ class ShaDowKHopSampler(torch.utils.data.DataLoader):
     def __init__(self, data: Data, depth: int, num_neighbors: int,
                  node_idx: Optional[Tensor] = None, replace: bool = False,
                  **kwargs):
+
+        if not WITH_TORCH_SPARSE:
+            raise ImportError(
+                f"'{self.__class__.__name__}' requires 'torch-sparse'")
 
         self.data = copy.copy(data)
         self.depth = depth
@@ -68,7 +79,7 @@ class ShaDowKHopSampler(torch.utils.data.DataLoader):
         adj_t = SparseTensor(rowptr=rowptr, col=col,
                              value=value[e_id] if value is not None else None,
                              sparse_sizes=(n_id.numel(), n_id.numel()),
-                             is_sorted=True)
+                             is_sorted=True, trust_data=True)
 
         batch = Batch(batch=torch.ops.torch_sparse.ptr2ind(ptr, n_id.numel()),
                       ptr=ptr)
@@ -81,7 +92,7 @@ class ShaDowKHopSampler(torch.utils.data.DataLoader):
             batch.edge_index = torch.stack([row, col], dim=0)
 
         for k, v in self.data:
-            if k in ['edge_index', 'adj_t', 'num_nodes']:
+            if k in ['edge_index', 'adj_t', 'num_nodes', 'batch', 'ptr']:
                 continue
             if k == 'y' and v.size(0) == self.data.num_nodes:
                 batch[k] = v[n_id][root_n_id]

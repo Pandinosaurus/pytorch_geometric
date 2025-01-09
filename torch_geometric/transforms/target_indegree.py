@@ -1,11 +1,17 @@
+from typing import Optional
+
 import torch
 
-from torch_geometric.utils import degree
+from torch_geometric.data import Data
+from torch_geometric.data.datapipes import functional_transform
 from torch_geometric.transforms import BaseTransform
+from torch_geometric.utils import degree
 
 
+@functional_transform('target_indegree')
 class TargetIndegree(BaseTransform):
     r"""Saves the globally normalized degree of target nodes
+    (functional name: :obj:`target_indegree`).
 
     .. math::
 
@@ -17,12 +23,18 @@ class TargetIndegree(BaseTransform):
         cat (bool, optional): Concat pseudo-coordinates to edge attributes
             instead of replacing them. (default: :obj:`True`)
     """
-    def __init__(self, norm=True, max_value=None, cat=True):
+    def __init__(
+        self,
+        norm: bool = True,
+        max_value: Optional[float] = None,
+        cat: bool = True,
+    ) -> None:
         self.norm = norm
         self.max = max_value
         self.cat = cat
 
-    def __call__(self, data):
+    def forward(self, data: Data) -> Data:
+        assert data.edge_index is not None
         col, pseudo = data.edge_index[1], data.edge_attr
 
         deg = degree(col, data.num_nodes)
@@ -41,6 +53,6 @@ class TargetIndegree(BaseTransform):
 
         return data
 
-    def __repr__(self):
-        return '{}(norm={}, max_value={})'.format(self.__class__.__name__,
-                                                  self.norm, self.max)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(norm={self.norm}, '
+                f'max_value={self.max})')

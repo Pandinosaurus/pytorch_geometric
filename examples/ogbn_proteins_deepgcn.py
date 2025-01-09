@@ -1,12 +1,12 @@
 import torch
-from tqdm import tqdm
 import torch.nn.functional as F
-from torch.nn import Linear, LayerNorm, ReLU
-from torch_scatter import scatter
-from ogb.nodeproppred import PygNodePropPredDataset, Evaluator
+from ogb.nodeproppred import Evaluator, PygNodePropPredDataset
+from torch.nn import LayerNorm, Linear, ReLU
+from tqdm import tqdm
 
-from torch_geometric.nn import GENConv, DeepGCNLayer
-from torch_geometric.loader import RandomNodeSampler
+from torch_geometric.loader import RandomNodeLoader
+from torch_geometric.nn import DeepGCNLayer, GENConv
+from torch_geometric.utils import scatter
 
 dataset = PygNodePropPredDataset('ogbn-proteins', root='../data')
 splitted_idx = dataset.get_idx_split()
@@ -16,7 +16,7 @@ data.y = data.y.to(torch.float)
 
 # Initialize features of nodes by aggregating edge features.
 row, col = data.edge_index
-data.x = scatter(data.edge_attr, col, 0, dim_size=data.num_nodes, reduce='add')
+data.x = scatter(data.edge_attr, col, dim_size=data.num_nodes, reduce='sum')
 
 # Set split indices to masks.
 for split in ['train', 'valid', 'test']:
@@ -24,14 +24,14 @@ for split in ['train', 'valid', 'test']:
     mask[splitted_idx[split]] = True
     data[f'{split}_mask'] = mask
 
-train_loader = RandomNodeSampler(data, num_parts=40, shuffle=True,
-                                 num_workers=5)
-test_loader = RandomNodeSampler(data, num_parts=5, num_workers=5)
+train_loader = RandomNodeLoader(data, num_parts=40, shuffle=True,
+                                num_workers=5)
+test_loader = RandomNodeLoader(data, num_parts=5, num_workers=5)
 
 
 class DeeperGCN(torch.nn.Module):
     def __init__(self, hidden_channels, num_layers):
-        super(DeeperGCN, self).__init__()
+        super().__init__()
 
         self.node_encoder = Linear(data.x.size(-1), hidden_channels)
         self.edge_encoder = Linear(data.edge_attr.size(-1), hidden_channels)

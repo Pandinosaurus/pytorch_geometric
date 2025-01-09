@@ -1,28 +1,30 @@
+import copy
 import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Sequential, Linear, ReLU, GRU
+from torch.nn import GRU, Linear, ReLU, Sequential
 
 import torch_geometric.transforms as T
 from torch_geometric.datasets import QM9
-from torch_geometric.nn import NNConv, Set2Set
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import NNConv, Set2Set
 from torch_geometric.utils import remove_self_loops
 
 target = 0
 dim = 64
 
 
-class MyTransform(object):
+class MyTransform:
     def __call__(self, data):
-        # Specify target.
-        data.y = data.y[:, target]
+        data = copy.copy(data)
+        data.y = data.y[:, target]  # Specify target.
         return data
 
 
-class Complete(object):
+class Complete:
     def __call__(self, data):
+        data = copy.copy(data)
         device = data.edge_index.device
 
         row = torch.arange(data.num_nodes, dtype=torch.long, device=device)
@@ -68,7 +70,7 @@ train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
 class Net(torch.nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.lin0 = torch.nn.Linear(dataset.num_features, dim)
 
         nn = Sequential(Linear(5, 128), ReLU(), Linear(128, dim * dim))
@@ -137,5 +139,5 @@ for epoch in range(1, 301):
         test_error = test(test_loader)
         best_val_error = val_error
 
-    print('Epoch: {:03d}, LR: {:7f}, Loss: {:.7f}, Validation MAE: {:.7f}, '
-          'Test MAE: {:.7f}'.format(epoch, lr, loss, val_error, test_error))
+    print(f'Epoch: {epoch:03d}, LR: {lr:7f}, Loss: {loss:.7f}, '
+          f'Val MAE: {val_error:.7f}, Test MAE: {test_error:.7f}')

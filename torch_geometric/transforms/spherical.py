@@ -1,12 +1,17 @@
 from math import pi as PI
+from typing import Optional
 
 import torch
 
+from torch_geometric.data import Data
+from torch_geometric.data.datapipes import functional_transform
 from torch_geometric.transforms import BaseTransform
 
 
+@functional_transform('spherical')
 class Spherical(BaseTransform):
-    r"""Saves the spherical coordinates of linked nodes in its edge attributes.
+    r"""Saves the spherical coordinates of linked nodes in its edge attributes
+    (functional name: :obj:`spherical`).
 
     Args:
         norm (bool, optional): If set to :obj:`False`, the output will not be
@@ -18,12 +23,19 @@ class Spherical(BaseTransform):
         cat (bool, optional): If set to :obj:`False`, all existing edge
             attributes will be replaced. (default: :obj:`True`)
     """
-    def __init__(self, norm=True, max_value=None, cat=True):
+    def __init__(
+        self,
+        norm: bool = True,
+        max_value: Optional[float] = None,
+        cat: bool = True,
+    ):
         self.norm = norm
         self.max = max_value
         self.cat = cat
 
-    def __call__(self, data):
+    def forward(self, data: Data) -> Data:
+        assert data.pos is not None
+        assert data.edge_index is not None
         (row, col), pos, pseudo = data.edge_index, data.pos, data.edge_attr
         assert pos.dim() == 2 and pos.size(1) == 3
 
@@ -51,6 +63,6 @@ class Spherical(BaseTransform):
 
         return data
 
-    def __repr__(self):
-        return '{}(norm={}, max_value={})'.format(self.__class__.__name__,
-                                                  self.norm, self.max)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(norm={self.norm}, '
+                f'max_value={self.max})')

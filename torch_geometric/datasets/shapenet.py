@@ -1,13 +1,17 @@
+import json
 import os
 import os.path as osp
-import shutil
-import json
+from typing import Callable, List, Optional, Union
 
 import torch
 
-from torch_geometric.data import (Data, InMemoryDataset, download_url,
-                                  extract_zip)
-from torch_geometric.io import read_txt_array
+from torch_geometric.data import (
+    Data,
+    InMemoryDataset,
+    download_url,
+    extract_zip,
+)
+from torch_geometric.io import fs, read_txt_array
 
 
 class ShapeNet(InMemoryDataset):
@@ -19,9 +23,9 @@ class ShapeNet(InMemoryDataset):
     Each category is annotated with 2 to 6 parts.
 
     Args:
-        root (string): Root directory where the dataset should be saved.
-        categories (string or [string], optional): The category of the CAD
-            models (one or a combination of :obj:`"Airplane"`, :obj:`"Bag"`,
+        root (str): Root directory where the dataset should be saved.
+        categories (str or [str], optional): The category of the CAD models
+            (one or a combination of :obj:`"Airplane"`, :obj:`"Bag"`,
             :obj:`"Cap"`, :obj:`"Car"`, :obj:`"Chair"`, :obj:`"Earphone"`,
             :obj:`"Guitar"`, :obj:`"Knife"`, :obj:`"Lamp"`, :obj:`"Laptop"`,
             :obj:`"Motorbike"`, :obj:`"Mug"`, :obj:`"Pistol"`, :obj:`"Rocket"`,
@@ -29,9 +33,10 @@ class ShapeNet(InMemoryDataset):
             Can be explicitly set to :obj:`None` to load all categories.
             (default: :obj:`None`)
         include_normals (bool, optional): If set to :obj:`False`, will not
-            include normal vectors as input features. (default: :obj:`True`)
-        split (string, optional): If :obj:`"train"`, loads the training
-            dataset.
+            include normal vectors as input features to :obj:`data.x`.
+            As a result, :obj:`data.x` will be :obj:`None`.
+            (default: :obj:`True`)
+        split (str, optional): If :obj:`"train"`, loads the training dataset.
             If :obj:`"val"`, loads the validation dataset.
             If :obj:`"trainval"`, loads the training and validation dataset.
             If :obj:`"test"`, loads the test dataset.
@@ -48,10 +53,33 @@ class ShapeNet(InMemoryDataset):
             :obj:`torch_geometric.data.Data` object and returns a boolean
             value, indicating whether the data object should be included in the
             final dataset. (default: :obj:`None`)
+        force_reload (bool, optional): Whether to re-process the dataset.
+            (default: :obj:`False`)
+
+    **STATS:**
+
+    .. list-table::
+        :widths: 10 10 10 10 10
+        :header-rows: 1
+
+        * - #graphs
+          - #nodes
+          - #edges
+          - #features
+          - #classes
+        * - 16,881
+          - ~2,616.2
+          - 0
+          - 3
+          - 50
     """
 
     url = ('https://shapenet.cs.stanford.edu/media/'
            'shapenetcore_partanno_segmentation_benchmark_v0_normal.zip')
+
+    # In case `shapenet.cs.stanford.edu` is offline, try to download the data
+    # from Kaggle instead (requires login):
+    # https://www.kaggle.com/datasets/mitkir/shapenet/download?datasetVersionNumber=1
 
     category_ids = {
         'Airplane': '02691156',
@@ -91,17 +119,25 @@ class ShapeNet(InMemoryDataset):
         'Table': [47, 48, 49],
     }
 
-    def __init__(self, root, categories=None, include_normals=True,
-                 split='trainval', transform=None, pre_transform=None,
-                 pre_filter=None):
+    def __init__(
+        self,
+        root: str,
+        categories: Optional[Union[str, List[str]]] = None,
+        include_normals: bool = True,
+        split: str = 'trainval',
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+        force_reload: bool = False,
+    ) -> None:
         if categories is None:
             categories = list(self.category_ids.keys())
         if isinstance(categories, str):
             categories = [categories]
         assert all(category in self.category_ids for category in categories)
         self.categories = categories
-        super(ShapeNet, self).__init__(root, transform, pre_transform,
-                                       pre_filter)
+        super().__init__(root, transform, pre_transform, pre_filter,
+                         force_reload=force_reload)
 
         if split == 'train':
             path = self.processed_paths[0]
@@ -112,11 +148,13 @@ class ShapeNet(InMemoryDataset):
         elif split == 'trainval':
             path = self.processed_paths[3]
         else:
-            raise ValueError((f'Split {split} found, but expected either '
-                              'train, val, trainval or test'))
+            raise ValueError(f'Split {split} found, but expected either '
+                             'train, val, trainval or test')
 
-        self.data, self.slices = torch.load(path)
-        self.data.x = self.data.x if include_normals else None
+        self.load(path)
+
+        assert isinstance(self._data, Data)
+        self._data.x = self._data.x if include_normals else None
 
         self.y_mask = torch.zeros((len(self.seg_classes.keys()), 50),
                                   dtype=torch.bool)
@@ -124,30 +162,30 @@ class ShapeNet(InMemoryDataset):
             self.y_mask[i, labels] = 1
 
     @property
-    def num_classes(self):
+    def num_classes(self) -> int:
         return self.y_mask.size(-1)
 
     @property
-    def raw_file_names(self):
+    def raw_file_names(self) -> List[str]:
         return list(self.category_ids.values()) + ['train_test_split']
 
     @property
-    def processed_file_names(self):
+    def processed_file_names(self) -> List[str]:
         cats = '_'.join([cat[:3].lower() for cat in self.categories])
         return [
-            os.path.join('{}_{}.pt'.format(cats, split))
+            osp.join(f'{cats}_{split}.pt')
             for split in ['train', 'val', 'test', 'trainval']
         ]
 
-    def download(self):
+    def download(self) -> None:
         path = download_url(self.url, self.root)
         extract_zip(path, self.root)
         os.unlink(path)
-        shutil.rmtree(self.raw_dir)
+        fs.rm(self.raw_dir)
         name = self.url.split('/')[-1].split('.')[0]
         os.rename(osp.join(self.root, name), self.raw_dir)
 
-    def process_filenames(self, filenames):
+    def process_filenames(self, filenames: List[str]) -> List[Data]:
         data_list = []
         categories_ids = [self.category_ids[cat] for cat in self.categories]
         cat_idx = {categories_ids[i]: i for i in range(len(categories_ids))}
@@ -157,10 +195,10 @@ class ShapeNet(InMemoryDataset):
             if cat not in categories_ids:
                 continue
 
-            data = read_txt_array(osp.join(self.raw_dir, name))
-            pos = data[:, :3]
-            x = data[:, 3:6]
-            y = data[:, -1].type(torch.long)
+            tensor = read_txt_array(osp.join(self.raw_dir, name))
+            pos = tensor[:, :3]
+            x = tensor[:, 3:6]
+            y = tensor[:, -1].type(torch.long)
             data = Data(pos=pos, x=x, y=y, category=cat_idx[cat])
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
@@ -170,12 +208,12 @@ class ShapeNet(InMemoryDataset):
 
         return data_list
 
-    def process(self):
+    def process(self) -> None:
         trainval = []
         for i, split in enumerate(['train', 'val', 'test']):
             path = osp.join(self.raw_dir, 'train_test_split',
                             f'shuffled_{split}_file_list.json')
-            with open(path, 'r') as f:
+            with open(path) as f:
                 filenames = [
                     osp.sep.join(name.split('/')[1:]) + '.txt'
                     for name in json.load(f)
@@ -183,9 +221,9 @@ class ShapeNet(InMemoryDataset):
             data_list = self.process_filenames(filenames)
             if split == 'train' or split == 'val':
                 trainval += data_list
-            torch.save(self.collate(data_list), self.processed_paths[i])
-        torch.save(self.collate(trainval), self.processed_paths[3])
+            self.save(data_list, self.processed_paths[i])
+        self.save(trainval, self.processed_paths[3])
 
-    def __repr__(self):
-        return '{}({}, categories={})'.format(self.__class__.__name__,
-                                              len(self), self.categories)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({len(self)}, '
+                f'categories={self.categories})')

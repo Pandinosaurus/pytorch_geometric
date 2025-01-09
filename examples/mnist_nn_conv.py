@@ -1,14 +1,24 @@
 import os.path as osp
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.datasets import MNISTSuperpixels
+from torch.nn import Linear, ReLU, Sequential
+
 import torch_geometric.transforms as T
+from torch_geometric.datasets import MNISTSuperpixels
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import (
+    NNConv,
+    global_mean_pool,
+    graclus,
+    max_pool,
+    max_pool_x,
+)
+from torch_geometric.typing import WITH_TORCH_CLUSTER
 from torch_geometric.utils import normalized_cut
-from torch_geometric.nn import (NNConv, graclus, max_pool, max_pool_x,
-                                global_mean_pool)
+
+if not WITH_TORCH_CLUSTER:
+    quit("This example requires 'torch-cluster'")
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'MNIST')
 transform = T.Cartesian(cat=False)
@@ -25,15 +35,21 @@ def normalized_cut_2d(edge_index, pos):
     return normalized_cut(edge_index, edge_attr, num_nodes=pos.size(0))
 
 
-class Net(nn.Module):
+class Net(torch.nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
-        nn1 = nn.Sequential(nn.Linear(2, 25), nn.ReLU(),
-                            nn.Linear(25, d.num_features * 32))
+        super().__init__()
+        nn1 = Sequential(
+            Linear(2, 25),
+            ReLU(),
+            Linear(25, d.num_features * 32),
+        )
         self.conv1 = NNConv(d.num_features, 32, nn1, aggr='mean')
 
-        nn2 = nn.Sequential(nn.Linear(2, 25), nn.ReLU(),
-                            nn.Linear(25, 32 * 64))
+        nn2 = Sequential(
+            Linear(2, 25),
+            ReLU(),
+            Linear(25, 32 * 64),
+        )
         self.conv2 = NNConv(32, 64, nn2, aggr='mean')
 
         self.fc1 = torch.nn.Linear(64, 128)
@@ -94,4 +110,4 @@ def test():
 for epoch in range(1, 31):
     train(epoch)
     test_acc = test()
-    print('Epoch: {:02d}, Test: {:.4f}'.format(epoch, test_acc))
+    print(f'Epoch: {epoch:02d}, Test: {test_acc:.4f}')

@@ -3,20 +3,22 @@ from typing import Union
 import torch
 from torch import Tensor
 
-from torch_geometric.utils import to_undirected
 from torch_geometric.data import Data, HeteroData
+from torch_geometric.data.datapipes import functional_transform
 from torch_geometric.transforms import BaseTransform
+from torch_geometric.utils import to_undirected
 
 
+@functional_transform('to_undirected')
 class ToUndirected(BaseTransform):
     r"""Converts a homogeneous or heterogeneous graph to an undirected graph
     such that :math:`(j,i) \in \mathcal{E}` for every edge
-    :math:`(i,j) \in \mathcal{E}`.
+    :math:`(i,j) \in \mathcal{E}` (functional name: :obj:`to_undirected`).
     In heterogeneous graphs, will add "reverse" connections for *all* existing
     edge types.
 
     Args:
-        reduce (string, optional): The reduce operation to use for merging edge
+        reduce (str, optional): The reduce operation to use for merging edge
             features (:obj:`"add"`, :obj:`"mean"`, :obj:`"min"`, :obj:`"max"`,
             :obj:`"mul"`). (default: :obj:`"add"`)
         merge (bool, optional): If set to :obj:`False`, will create reverse
@@ -32,7 +34,10 @@ class ToUndirected(BaseTransform):
         self.reduce = reduce
         self.merge = merge
 
-    def __call__(self, data: Union[Data, HeteroData]):
+    def forward(
+        self,
+        data: Union[Data, HeteroData],
+    ) -> Union[Data, HeteroData]:
         for store in data.edge_stores:
             if 'edge_index' not in store:
                 continue
@@ -50,13 +55,18 @@ class ToUndirected(BaseTransform):
                 inv_store = data[dst, f'rev_{rel}', src]
                 inv_store.edge_index = rev_edge_index
                 for key, value in store.items():
+                    if key == 'edge_index':
+                        continue
                     if isinstance(value, Tensor) and value.size(0) == nnz:
                         inv_store[key] = value
 
             else:
                 keys, values = [], []
                 for key, value in store.items():
-                    if isinstance(value, Tensor) and value.size(0) == nnz:
+                    if key == 'edge_index':
+                        continue
+
+                    if store.is_edge_attr(key):
                         keys.append(key)
                         values.append(value)
 
@@ -67,6 +77,3 @@ class ToUndirected(BaseTransform):
                     store[key] = value
 
         return data
-
-    def __repr__(self) -> str:
-        return f'{self.__class__.__name__}()'

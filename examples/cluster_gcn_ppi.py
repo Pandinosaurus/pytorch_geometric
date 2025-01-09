@@ -1,13 +1,14 @@
 import os.path as osp
+import time
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.datasets import PPI
-from torch_geometric.nn import SAGEConv, BatchNorm
-from torch_geometric.data import Batch
-from torch_geometric.loader import DataLoader
-from torch_geometric.loader import ClusterData, ClusterLoader
 from sklearn.metrics import f1_score
+
+from torch_geometric.data import Batch
+from torch_geometric.datasets import PPI
+from torch_geometric.loader import ClusterData, ClusterLoader, DataLoader
+from torch_geometric.nn import BatchNorm, SAGEConv
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'PPI')
 train_dataset = PPI(path, split='train')
@@ -26,7 +27,7 @@ test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False)
 
 class Net(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers):
-        super(Net, self).__init__()
+        super().__init__()
         self.convs = torch.nn.ModuleList()
         self.batch_norms = torch.nn.ModuleList()
         self.convs.append(SAGEConv(in_channels, hidden_channels))
@@ -80,9 +81,13 @@ def test(loader):
     return f1_score(y, pred, average='micro') if pred.sum() > 0 else 0
 
 
+times = []
 for epoch in range(1, 201):
+    start = time.time()
     loss = train()
     val_f1 = test(val_loader)
     test_f1 = test(test_loader)
-    print('Epoch: {:02d}, Loss: {:.4f}, Val: {:.4f}, Test: {:.4f}'.format(
-        epoch, loss, val_f1, test_f1))
+    print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Val: {val_f1:.4f}, '
+          f'Test: {test_f1:.4f}')
+    times.append(time.time() - start)
+print(f"Median time per epoch: {torch.tensor(times).median():.4f}s")
