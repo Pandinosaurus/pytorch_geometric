@@ -1,24 +1,38 @@
+import functools
+import inspect
 import logging
 import os
-from yacs.config import CfgNode as CN
-import shutil
+import os.path as osp
+import warnings
+from collections.abc import Iterable
+from dataclasses import asdict
+from typing import Any
 
 import torch_geometric.graphgym.register as register
+from torch_geometric.io import fs
 
-# Global config object
-cfg = CN()
+try:  # Define global config object
+    from yacs.config import CfgNode as CN
+    cfg = CN()
+except ImportError:
+    cfg = None
+    warnings.warn("Could not define global config object. Please install "
+                  "'yacs' via 'pip install yacs' in order to use GraphGym")
 
 
 def set_cfg(cfg):
-    r'''
-    This function sets the default config value.
-    1) Note that for an experiment, only part of the arguments will be used
-    The remaining unused arguments won't affect anything.
-    So feel free to register any argument in graphgym.contrib.config
-    2) We support *at most* two levels of configs, e.g., cfg.dataset.name
+    r"""This function sets the default config value.
 
-    :return: configuration use by the experiment.
-    '''
+    1) Note that for an experiment, only part of the arguments will be used
+       The remaining unused arguments won't affect anything.
+       So feel free to register any argument in graphgym.contrib.config
+    2) We support *at most* two levels of configs, *e.g.*,
+       :obj:`cfg.dataset.name`.
+
+    :return: Configuration use by the experiment.
+    """
+    if cfg is None:
+        return cfg
 
     # ----------------------------------------------------------------------- #
     # Basic options
@@ -27,8 +41,11 @@ def set_cfg(cfg):
     # Set print destination: stdout / file / both
     cfg.print = 'both'
 
-    # Select device: 'cpu', 'cuda:0', 'auto'
-    cfg.device = 'auto'
+    # Select device: 'cpu', 'cuda', 'auto'
+    cfg.accelerator = 'auto'
+
+    # number of devices: eg. for 2 GPU set cfg.devices=2
+    cfg.devices = 1
 
     # Output directory
     cfg.out_dir = 'results'
@@ -36,8 +53,11 @@ def set_cfg(cfg):
     # Config name (in out_dir)
     cfg.cfg_dest = 'config.yaml'
 
+    # Names of registered custom metric funcs to be used (use defaults if none)
+    cfg.custom_metrics = []
+
     # Random seed
-    cfg.seed = 1
+    cfg.seed = 0
 
     # Print rounding
     cfg.round = 4
@@ -203,32 +223,9 @@ def set_cfg(cfg):
     cfg.dataset.label_column = 'none'
 
     # ----------------------------------------------------------------------- #
-    # Snowflake options
-    # ----------------------------------------------------------------------- #
-    cfg.snowflake = CN()
-
-    # Account name
-    cfg.snowflake.account = 'EPA65780'
-
-    # User name
-    cfg.snowflake.user = 'yjxxx'
-
-    # Password
-    cfg.snowflake.password = 'Test12345'
-
-    # Warehouse name
-    cfg.snowflake.warehouse = 'SF_TUTS_WH'
-
-    # Database name
-    cfg.snowflake.database = 'Vrtex'
-
-    # ----------------------------------------------------------------------- #
     # Training options
     # ----------------------------------------------------------------------- #
     cfg.train = CN()
-
-    # Training (and validation) pipeline mode
-    cfg.train.mode = 'standard'
 
     # Total graph mini-batch size
     cfg.train.batch_size = 16
@@ -248,8 +245,14 @@ def set_cfg(cfg):
     # Evaluate model on test data every eval period epochs
     cfg.train.eval_period = 10
 
+    # Option to skip training epoch evaluation
+    cfg.train.skip_train_eval = False
+
     # Save model checkpoint every checkpoint period epochs
     cfg.train.ckpt_period = 100
+
+    # Enabling checkpoint, set False to disable and save I/O
+    cfg.train.enable_ckpt = True
 
     # Resume training from the latest checkpoint in the output directory
     cfg.train.auto_resume = False
@@ -448,10 +451,10 @@ def set_cfg(cfg):
 
 
 def assert_cfg(cfg):
-    r"""Checks config values, do necessary post processing to the configs"""
+    r"""Checks config values, do necessary post processing to the configs."""
     if cfg.dataset.task not in ['node', 'edge', 'graph', 'link_pred']:
-        raise ValueError('Task {} not supported, must be one of node, '
-                         'edge, graph, link_pred'.format(cfg.dataset.task))
+        raise ValueError(f"Task '{cfg.dataset.task}' not supported. Must be "
+                         f"one of node, edge, graph, link_pred")
     if 'classification' in cfg.dataset.task_type and cfg.model.loss_fun == \
             'mse':
         cfg.model.loss_fun = 'cross_entropy'
@@ -474,27 +477,24 @@ def assert_cfg(cfg):
 
 
 def dump_cfg(cfg):
-    r"""
-    Dumps the config to the output directory specified in
-    :obj:`cfg.out_dir`
+    r"""Dumps the config to the output directory specified in
+    :obj:`cfg.out_dir`.
 
     Args:
         cfg (CfgNode): Configuration node
-
     """
-    cfg_file = os.path.join(cfg.out_dir, cfg.cfg_dest)
+    os.makedirs(cfg.out_dir, exist_ok=True)
+    cfg_file = osp.join(cfg.out_dir, cfg.cfg_dest)
     with open(cfg_file, 'w') as f:
         cfg.dump(stream=f)
 
 
 def load_cfg(cfg, args):
-    r"""
-    Load configurations from file system and command line
+    r"""Load configurations from file system and command line.
 
     Args:
         cfg (CfgNode): Configuration node
         args (ArgumentParser): Command argument parser
-
     """
     cfg.merge_from_file(args.cfg_file)
     cfg.merge_from_list(args.opts)
@@ -502,24 +502,48 @@ def load_cfg(cfg, args):
 
 
 def makedirs_rm_exist(dir):
-    if os.path.isdir(dir):
-        shutil.rmtree(dir)
+    if osp.isdir(dir):
+        fs.rm(dir)
     os.makedirs(dir, exist_ok=True)
 
 
-def set_run_dir(out_dir, fname):
-    r"""
-    Create the directory for each random seed experiment run
+def get_fname(fname):
+    r"""Extract filename from file name path.
 
     Args:
-        out_dir (string): Directory for output, specified in :obj:`cfg.out_dir`
-        fname (string): Filename for the yaml format configuration file
-
+        fname (str): Filename for the yaml format configuration file
     """
-    fname = fname.split('/')[-1]
+    fname = osp.basename(fname)
     if fname.endswith('.yaml'):
         fname = fname[:-5]
-    cfg.run_dir = os.path.join(out_dir, fname, str(cfg.seed))
+    elif fname.endswith('.yml'):
+        fname = fname[:-4]
+    return fname
+
+
+def set_out_dir(out_dir, fname):
+    r"""Create the directory for full experiment run.
+
+    Args:
+        out_dir (str): Directory for output, specified in :obj:`cfg.out_dir`
+        fname (str): Filename for the yaml format configuration file
+    """
+    fname = get_fname(fname)
+    cfg.out_dir = osp.join(out_dir, fname)
+    # Make output directory
+    if cfg.train.auto_resume:
+        os.makedirs(cfg.out_dir, exist_ok=True)
+    else:
+        makedirs_rm_exist(cfg.out_dir)
+
+
+def set_run_dir(out_dir):
+    r"""Create the directory for each random seed experiment run.
+
+    Args:
+        out_dir (str): Directory for output, specified in :obj:`cfg.out_dir`
+    """
+    cfg.run_dir = osp.join(out_dir, str(cfg.seed))
     # Make output directory
     if cfg.train.auto_resume:
         os.makedirs(cfg.run_dir, exist_ok=True)
@@ -527,20 +551,31 @@ def set_run_dir(out_dir, fname):
         makedirs_rm_exist(cfg.run_dir)
 
 
-def set_agg_dir(out_dir, fname):
-    r"""
-    Create the directory for aggregated results over
-    all the random seeds
-
-    Args:
-        out_dir (string): Directory for output, specified in :obj:`cfg.out_dir`
-        fname (string): Filename for the yaml format configuration file
-
-    """
-    fname = fname.split('/')[-1]
-    if fname.endswith('.yaml'):
-        fname = fname[:-5]
-    return os.path.join(out_dir, fname)
-
-
 set_cfg(cfg)
+
+
+def from_config(func):
+    if inspect.isclass(func):
+        params = list(inspect.signature(func.__init__).parameters.values())[1:]
+    else:
+        params = list(inspect.signature(func).parameters.values())
+
+    arg_names = [p.name for p in params]
+    has_defaults = [p.default != inspect.Parameter.empty for p in params]
+
+    @functools.wraps(func)
+    def wrapper(*args, cfg: Any = None, **kwargs):
+        if cfg is not None:
+            cfg = dict(cfg) if isinstance(cfg, Iterable) else asdict(cfg)
+
+            iterator = zip(arg_names[len(args):], has_defaults[len(args):])
+            for arg_name, has_default in iterator:
+                if arg_name in kwargs:
+                    continue
+                elif arg_name in cfg:
+                    kwargs[arg_name] = cfg[arg_name]
+                elif not has_default:
+                    raise ValueError(f"'cfg.{arg_name}' undefined")
+        return func(*args, **kwargs)
+
+    return wrapper

@@ -1,11 +1,13 @@
 import argparse
 import os.path as osp
+import time
 
 import torch
+from sklearn.metrics import f1_score
+
 from torch_geometric.datasets import PPI
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATConv
-from sklearn.metrics import f1_score
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='GeniePathLazy')
@@ -27,7 +29,7 @@ layer_num = 4
 
 class Breadth(torch.nn.Module):
     def __init__(self, in_dim, out_dim):
-        super(Breadth, self).__init__()
+        super().__init__()
         self.gatconv = GATConv(in_dim, out_dim, heads=1)
 
     def forward(self, x, edge_index):
@@ -37,7 +39,7 @@ class Breadth(torch.nn.Module):
 
 class Depth(torch.nn.Module):
     def __init__(self, in_dim, hidden):
-        super(Depth, self).__init__()
+        super().__init__()
         self.lstm = torch.nn.LSTM(in_dim, hidden, 1, bias=False)
 
     def forward(self, x, h, c):
@@ -47,7 +49,7 @@ class Depth(torch.nn.Module):
 
 class GeniePathLayer(torch.nn.Module):
     def __init__(self, in_dim):
-        super(GeniePathLayer, self).__init__()
+        super().__init__()
         self.breadth_func = Breadth(in_dim, dim)
         self.depth_func = Depth(dim, lstm_hidden)
 
@@ -61,7 +63,7 @@ class GeniePathLayer(torch.nn.Module):
 
 class GeniePath(torch.nn.Module):
     def __init__(self, in_dim, out_dim):
-        super(GeniePath, self).__init__()
+        super().__init__()
         self.lin1 = torch.nn.Linear(in_dim, dim)
         self.gplayers = torch.nn.ModuleList(
             [GeniePathLayer(dim) for i in range(layer_num)])
@@ -79,7 +81,7 @@ class GeniePath(torch.nn.Module):
 
 class GeniePathLazy(torch.nn.Module):
     def __init__(self, in_dim, out_dim):
-        super(GeniePathLazy, self).__init__()
+        super().__init__()
         self.lin1 = torch.nn.Linear(in_dim, dim)
         self.breadths = torch.nn.ModuleList(
             [Breadth(dim, dim) for i in range(layer_num)])
@@ -140,9 +142,13 @@ def test(loader):
     return f1_score(y, pred, average='micro') if pred.sum() > 0 else 0
 
 
+times = []
 for epoch in range(1, 101):
+    start = time.time()
     loss = train()
     val_f1 = test(val_loader)
     test_f1 = test(test_loader)
-    print('Epoch: {:02d}, Loss: {:.4f}, Val: {:.4f}, Test: {:.4f}'.format(
-        epoch, loss, val_f1, test_f1))
+    print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Val: {val_f1:.4f}, '
+          f'Test: {test_f1:.4f}')
+    times.append(time.time() - start)
+print(f"Median time per epoch: {torch.tensor(times).median():.4f}s")

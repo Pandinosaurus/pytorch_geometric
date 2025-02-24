@@ -1,9 +1,16 @@
+from typing import Callable, List, Union
+
 import torch
-import torch.nn.functional as F
-from torch_sparse import spspmm
-from torch_geometric.nn import TopKPooling, GCNConv
-from torch_geometric.utils import (add_self_loops, sort_edge_index,
-                                   remove_self_loops)
+from torch import Tensor
+
+from torch_geometric.nn import GCNConv, TopKPooling
+from torch_geometric.nn.resolver import activation_resolver
+from torch_geometric.typing import OptTensor, PairTensor
+from torch_geometric.utils import (
+    add_self_loops,
+    remove_self_loops,
+    to_torch_csr_tensor,
+)
 from torch_geometric.utils.repeat import repeat
 
 
@@ -25,16 +32,24 @@ class GraphUNet(torch.nn.Module):
         act (torch.nn.functional, optional): The nonlinearity to use.
             (default: :obj:`torch.nn.functional.relu`)
     """
-    def __init__(self, in_channels, hidden_channels, out_channels, depth,
-                 pool_ratios=0.5, sum_res=True, act=F.relu):
-        super(GraphUNet, self).__init__()
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        depth: int,
+        pool_ratios: Union[float, List[float]] = 0.5,
+        sum_res: bool = True,
+        act: Union[str, Callable] = 'relu',
+    ):
+        super().__init__()
         assert depth >= 1
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
         self.depth = depth
         self.pool_ratios = repeat(pool_ratios, depth)
-        self.act = act
+        self.act = activation_resolver(act)
         self.sum_res = sum_res
 
         channels = hidden_channels
@@ -56,6 +71,7 @@ class GraphUNet(torch.nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
+        r"""Resets all learnable parameters of the module."""
         for conv in self.down_convs:
             conv.reset_parameters()
         for pool in self.pools:
@@ -63,11 +79,21 @@ class GraphUNet(torch.nn.Module):
         for conv in self.up_convs:
             conv.reset_parameters()
 
-    def forward(self, x, edge_index, batch=None):
-        """"""
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        batch: OptTensor = None,
+        edge_weight: Tensor = None,
+    ) -> Tensor:
+        """"""  # noqa: D419
         if batch is None:
             batch = edge_index.new_zeros(x.size(0))
-        edge_weight = x.new_ones(edge_index.size(1))
+
+        if edge_weight is None:
+            edge_weight = x.new_ones(edge_index.size(1))
+        assert edge_weight.dim() == 1
+        assert edge_weight.size(0) == edge_index.size(1)
 
         x = self.down_convs[0](x, edge_index, edge_weight)
         x = self.act(x)
@@ -109,19 +135,19 @@ class GraphUNet(torch.nn.Module):
 
         return x
 
-    def augment_adj(self, edge_index, edge_weight, num_nodes):
+    def augment_adj(self, edge_index: Tensor, edge_weight: Tensor,
+                    num_nodes: int) -> PairTensor:
         edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
         edge_index, edge_weight = add_self_loops(edge_index, edge_weight,
                                                  num_nodes=num_nodes)
-        edge_index, edge_weight = sort_edge_index(edge_index, edge_weight,
-                                                  num_nodes)
-        edge_index, edge_weight = spspmm(edge_index, edge_weight, edge_index,
-                                         edge_weight, num_nodes, num_nodes,
-                                         num_nodes)
+        adj = to_torch_csr_tensor(edge_index, edge_weight,
+                                  size=(num_nodes, num_nodes))
+        adj = (adj @ adj).to_sparse_coo()
+        edge_index, edge_weight = adj.indices(), adj.values()
         edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
         return edge_index, edge_weight
 
-    def __repr__(self):
-        return '{}({}, {}, {}, depth={}, pool_ratios={})'.format(
-            self.__class__.__name__, self.in_channels, self.hidden_channels,
-            self.out_channels, self.depth, self.pool_ratios)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.hidden_channels}, {self.out_channels}, '
+                f'depth={self.depth}, pool_ratios={self.pool_ratios})')

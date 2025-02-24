@@ -1,10 +1,12 @@
+import glob
 import os
 import os.path as osp
-import glob
+from typing import Callable, List, Optional
 
 import torch
+
 from torch_geometric.data import InMemoryDataset, download_url, extract_zip
-from torch_geometric.io import read_off, read_txt_array
+from torch_geometric.io import fs, read_off, read_txt_array
 
 
 class SHREC2016(InMemoryDataset):
@@ -24,10 +26,10 @@ class SHREC2016(InMemoryDataset):
         face area.
 
     Args:
-        root (string): Root directory where the dataset should be saved.
-        partiality (string): The partiality of the dataset (one of
-            :obj:`"Holes"`, :obj:`"Cuts"`).
-        category (string): The category of the dataset (one of
+        root (str): Root directory where the dataset should be saved.
+        partiality (str): The partiality of the dataset (one of :obj:`"Holes"`,
+            :obj:`"Cuts"`).
+        category (str): The category of the dataset (one of
             :obj:`"Cat"`, :obj:`"Centaur"`, :obj:`"David"`, :obj:`"Dog"`,
             :obj:`"Horse"`, :obj:`"Michael"`, :obj:`"Victoria"`,
             :obj:`"Wolf"`).
@@ -45,6 +47,8 @@ class SHREC2016(InMemoryDataset):
             :obj:`torch_geometric.data.Data` object and returns a boolean
             value, indicating whether the data object should be included in the
             final dataset. (default: :obj:`None`)
+        force_reload (bool, optional): Whether to re-process the dataset.
+            (default: :obj:`False`)
     """
 
     train_url = ('http://www.dais.unive.it/~shrec2016/data/'
@@ -58,35 +62,44 @@ class SHREC2016(InMemoryDataset):
     ]
     partialities = ['holes', 'cuts']
 
-    def __init__(self, root, partiality, category, train=True, transform=None,
-                 pre_transform=None, pre_filter=None):
+    def __init__(
+        self,
+        root: str,
+        partiality: str,
+        category: str,
+        train: bool = True,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+        force_reload: bool = False,
+    ) -> None:
         assert partiality.lower() in self.partialities
         self.part = partiality.lower()
         assert category.lower() in self.categories
         self.cat = category.lower()
-        super(SHREC2016, self).__init__(root, transform, pre_transform,
-                                        pre_filter)
-        self.__ref__ = torch.load(self.processed_paths[0])
+        super().__init__(root, transform, pre_transform, pre_filter,
+                         force_reload=force_reload)
+        self.__ref__ = fs.torch_load(self.processed_paths[0])
         path = self.processed_paths[1] if train else self.processed_paths[2]
-        self.data, self.slices = torch.load(path)
+        self.load(path)
 
     @property
-    def ref(self):
+    def ref(self) -> str:
         ref = self.__ref__
         if self.transform is not None:
             ref = self.transform(ref)
         return ref
 
     @property
-    def raw_file_names(self):
+    def raw_file_names(self) -> List[str]:
         return ['training', 'test']
 
     @property
-    def processed_file_names(self):
-        name = '{}_{}.pt'.format(self.part, self.cat)
-        return ['{}_{}'.format(i, name) for i in ['ref', 'training', 'test']]
+    def processed_file_names(self) -> List[str]:
+        name = f'{self.part}_{self.cat}.pt'
+        return [f'{i}_{name}' for i in ['ref', 'training', 'test']]
 
-    def download(self):
+    def download(self) -> None:
         path = download_url(self.train_url, self.raw_dir)
         extract_zip(path, self.raw_dir)
         os.unlink(path)
@@ -100,31 +113,31 @@ class SHREC2016(InMemoryDataset):
                         'shrec2016_PartialDeformableShapes_TestSet')
         os.rename(path, osp.join(self.raw_dir, 'test'))
 
-    def process(self):
+    def process(self) -> None:
         ref_data = read_off(
-            osp.join(self.raw_paths[0], 'null', '{}.off'.format(self.cat)))
+            osp.join(self.raw_paths[0], 'null', f'{self.cat}.off'))
 
         train_list = []
-        name = '{}_{}_*.off'.format(self.part, self.cat)
+        name = f'{self.part}_{self.cat}_*.off'
         paths = glob.glob(osp.join(self.raw_paths[0], self.part, name))
         paths = [path[:-4] for path in paths]
         paths = sorted(paths, key=lambda e: (len(e), e))
 
         for path in paths:
-            data = read_off('{}.off'.format(path))
-            y = read_txt_array('{}.baryc_gt'.format(path))
+            data = read_off(f'{path}.off')
+            y = read_txt_array(f'{path}.baryc_gt')
             data.y = y[:, 0].to(torch.long) - 1
             data.y_baryc = y[:, 1:]
             train_list.append(data)
 
         test_list = []
-        name = '{}_{}_*.off'.format(self.part, self.cat)
+        name = f'{self.part}_{self.cat}_*.off'
         paths = glob.glob(osp.join(self.raw_paths[1], self.part, name))
         paths = [path[:-4] for path in paths]
         paths = sorted(paths, key=lambda e: (len(e), e))
 
         for path in paths:
-            test_list.append(read_off('{}.off'.format(path)))
+            test_list.append(read_off(f'{path}.off'))
 
         if self.pre_filter is not None:
             train_list = [d for d in train_list if self.pre_filter(d)]
@@ -136,9 +149,9 @@ class SHREC2016(InMemoryDataset):
             test_list = [self.pre_transform(d) for d in test_list]
 
         torch.save(ref_data, self.processed_paths[0])
-        torch.save(self.collate(train_list), self.processed_paths[1])
-        torch.save(self.collate(test_list), self.processed_paths[2])
+        self.save(train_list, self.processed_paths[1])
+        self.save(test_list, self.processed_paths[2])
 
-    def __repr__(self):
-        return '{}({}, partiality={}, category={})'.format(
-            self.__class__.__name__, len(self), self.part, self.cat)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({len(self)}, '
+                f'partiality={self.part}, category={self.cat})')

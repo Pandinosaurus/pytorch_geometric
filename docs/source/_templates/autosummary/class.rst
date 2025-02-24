@@ -1,8 +1,7 @@
+{{ fullname | escape | underline}}
+
 .. currentmodule:: {{ module }}
 
-{{ name | underline }}
-
-.. autoclass:: {{ name }}
-    :members:
-    :undoc-members:
-    :exclude-members: message, aggregate, message_and_aggregate, update, MessagePassing
+.. autoclass:: {{ objname }}
+   :show-inheritance:
+   :members:

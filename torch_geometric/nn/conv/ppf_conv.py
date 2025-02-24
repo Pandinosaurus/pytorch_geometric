@@ -1,13 +1,19 @@
-from typing import Optional, Callable, Union
-from torch_geometric.typing import OptTensor, PairOptTensor, PairTensor, Adj
+from typing import Callable, Optional, Union
 
 import torch
 from torch import Tensor
-from torch_sparse import SparseTensor, set_diag
-from torch_geometric.utils import remove_self_loops, add_self_loops
-from torch_geometric.nn.conv import MessagePassing
 
-from ..inits import reset
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.inits import reset
+from torch_geometric.typing import (
+    Adj,
+    OptTensor,
+    PairOptTensor,
+    PairTensor,
+    SparseTensor,
+    torch_sparse,
+)
+from torch_geometric.utils import add_self_loops, remove_self_loops
 
 
 def get_angle(v1: Tensor, v2: Tensor) -> Tensor:
@@ -29,7 +35,7 @@ def point_pair_features(pos_i: Tensor, pos_j: Tensor, normal_i: Tensor,
 class PPFConv(MessagePassing):
     r"""The PPFNet operator from the `"PPFNet: Global Context Aware Local
     Features for Robust 3D Point Matching" <https://arxiv.org/abs/1802.02669>`_
-    paper
+    paper.
 
     .. math::
         \mathbf{x}^{\prime}_i = \gamma_{\mathbf{\Theta}} \left( \max_{j \in
@@ -58,12 +64,26 @@ class PPFConv(MessagePassing):
             self-loops to the input graph. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})` or
+          :math:`((|\mathcal{V_s}|, F_{s}), (|\mathcal{V_t}|, F_{t}))`
+          if bipartite,
+          positions :math:`(|\mathcal{V}|, 3)` or
+          :math:`((|\mathcal{V_s}|, 3), (|\mathcal{V_t}|, 3))` if bipartite,
+          point normals :math:`(|\mathcal{V}, 3)` or
+          :math:`((|\mathcal{V_s}|, 3), (|\mathcal{V_t}|, 3))` if bipartite,
+          edge indices :math:`(2, |\mathcal{E}|)`
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})` or
+          :math:`(|\mathcal{V}_t|, F_{out})` if bipartite
+
     """
     def __init__(self, local_nn: Optional[Callable] = None,
                  global_nn: Optional[Callable] = None,
                  add_self_loops: bool = True, **kwargs):
         kwargs.setdefault('aggr', 'max')
-        super(PPFConv, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.local_nn = local_nn
         self.global_nn = global_nn
@@ -72,22 +92,26 @@ class PPFConv(MessagePassing):
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         reset(self.local_nn)
         reset(self.global_nn)
 
-    def forward(self, x: Union[OptTensor, PairOptTensor],
-                pos: Union[Tensor, PairTensor],
-                normal: Union[Tensor, PairTensor],
-                edge_index: Adj) -> Tensor:  # yapf: disable
-        """"""
+    def forward(
+        self,
+        x: Union[OptTensor, PairOptTensor],
+        pos: Union[Tensor, PairTensor],
+        normal: Union[Tensor, PairTensor],
+        edge_index: Adj,
+    ) -> Tensor:
+
         if not isinstance(x, tuple):
-            x: PairOptTensor = (x, None)
+            x = (x, None)
 
         if isinstance(pos, Tensor):
-            pos: PairTensor = (pos, pos)
+            pos = (pos, pos)
 
         if isinstance(normal, Tensor):
-            normal: PairTensor = (normal, normal)
+            normal = (normal, normal)
 
         if self.add_self_loops:
             if isinstance(edge_index, Tensor):
@@ -95,11 +119,11 @@ class PPFConv(MessagePassing):
                 edge_index, _ = add_self_loops(edge_index,
                                                num_nodes=pos[1].size(0))
             elif isinstance(edge_index, SparseTensor):
-                edge_index = set_diag(edge_index)
+                edge_index = torch_sparse.set_diag(edge_index)
 
-        # propagate_type: (x: PairOptTensor, pos: PairTensor, normal: PairTensor)  # noqa
-        out = self.propagate(edge_index, x=x, pos=pos, normal=normal,
-                             size=None)
+        # propagate_type: (x: PairOptTensor, pos: PairTensor,
+        #                  normal: PairTensor)
+        out = self.propagate(edge_index, x=x, pos=pos, normal=normal)
 
         if self.global_nn is not None:
             out = self.global_nn(out)
@@ -115,7 +139,6 @@ class PPFConv(MessagePassing):
             msg = self.local_nn(msg)
         return msg
 
-    def __repr__(self):
-        return '{}(local_nn={}, global_nn={})'.format(self.__class__.__name__,
-                                                      self.local_nn,
-                                                      self.global_nn)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(local_nn={self.local_nn}, '
+                f'global_nn={self.global_nn})')

@@ -1,85 +1,76 @@
+import warnings
+from typing import Any, Dict, Optional
+
 import torch
-import time
-import logging
+from torch.utils.data import DataLoader
 
+from torch_geometric.data.lightning.datamodule import LightningDataModule
+from torch_geometric.graphgym import create_loader
+from torch_geometric.graphgym.checkpoint import get_ckpt_dir
 from torch_geometric.graphgym.config import cfg
-from torch_geometric.graphgym.loss import compute_loss
-from torch_geometric.graphgym.utils.epoch import is_eval_epoch, is_ckpt_epoch
-from torch_geometric.graphgym.checkpoint import load_ckpt, save_ckpt, \
-    clean_ckpt
+from torch_geometric.graphgym.imports import pl
+from torch_geometric.graphgym.logger import LoggerCallback
+from torch_geometric.graphgym.model_builder import GraphGymModule
 
 
-def train_epoch(logger, loader, model, optimizer, scheduler):
-    model.train()
-    time_start = time.time()
-    for batch in loader:
-        batch.split = 'train'
-        optimizer.zero_grad()
-        batch.to(torch.device(cfg.device))
-        pred, true = model(batch)
-        loss, pred_score = compute_loss(pred, true)
-        loss.backward()
-        optimizer.step()
-        logger.update_stats(true=true.detach().cpu(),
-                            pred=pred_score.detach().cpu(), loss=loss.item(),
-                            lr=scheduler.get_last_lr()[0],
-                            time_used=time.time() - time_start,
-                            params=cfg.params)
-        time_start = time.time()
-    scheduler.step()
+class GraphGymDataModule(LightningDataModule):
+    r"""A :class:`pytorch_lightning.LightningDataModule` for handling data
+    loading routines in GraphGym.
 
-
-@torch.no_grad()
-def eval_epoch(logger, loader, model, split='val'):
-    model.eval()
-    time_start = time.time()
-    for batch in loader:
-        batch.split = split
-        batch.to(torch.device(cfg.device))
-        pred, true = model(batch)
-        loss, pred_score = compute_loss(pred, true)
-        logger.update_stats(true=true.detach().cpu(),
-                            pred=pred_score.detach().cpu(), loss=loss.item(),
-                            lr=0, time_used=time.time() - time_start,
-                            params=cfg.params)
-        time_start = time.time()
-
-
-def train(loggers, loaders, model, optimizer, scheduler):
+    This class provides data loaders for training, validation, and testing, and
+    can be accessed through the :meth:`train_dataloader`,
+    :meth:`val_dataloader`, and :meth:`test_dataloader` methods, respectively.
     """
-    The core training pipeline
+    def __init__(self):
+        self.loaders = create_loader()
+        super().__init__(has_val=True, has_test=True)
+
+    def train_dataloader(self) -> DataLoader:
+        return self.loaders[0]
+
+    def val_dataloader(self) -> DataLoader:
+        # better way would be to test after fit.
+        # First call trainer.fit(...) then trainer.test(...)
+        return self.loaders[1]
+
+    def test_dataloader(self) -> DataLoader:
+        return self.loaders[2]
+
+
+def train(
+    model: GraphGymModule,
+    datamodule: GraphGymDataModule,
+    logger: bool = True,
+    trainer_config: Optional[Dict[str, Any]] = None,
+):
+    r"""Trains a GraphGym model using PyTorch Lightning.
 
     Args:
-        loggers: List of loggers
-        loaders: List of loaders
-        model: GNN model
-        optimizer: PyTorch optimizer
-        scheduler: PyTorch learning rate scheduler
-
+        model (GraphGymModule): The GraphGym model.
+        datamodule (GraphGymDataModule): The GraphGym data module.
+        logger (bool, optional): Whether to enable logging during training.
+            (default: :obj:`True`)
+        trainer_config (dict, optional): Additional trainer configuration.
     """
-    start_epoch = 0
-    if cfg.train.auto_resume:
-        start_epoch = load_ckpt(model, optimizer, scheduler)
-    if start_epoch == cfg.optim.max_epoch:
-        logging.info('Checkpoint found, Task already done')
-    else:
-        logging.info('Start from epoch {}'.format(start_epoch))
+    warnings.filterwarnings('ignore', '.*use `CSVLogger` as the default.*')
 
-    num_splits = len(loggers)
-    split_names = ['val', 'test']
-    for cur_epoch in range(start_epoch, cfg.optim.max_epoch):
-        train_epoch(loggers[0], loaders[0], model, optimizer, scheduler)
-        loggers[0].write_epoch(cur_epoch)
-        if is_eval_epoch(cur_epoch):
-            for i in range(1, num_splits):
-                eval_epoch(loggers[i], loaders[i], model,
-                           split=split_names[i - 1])
-                loggers[i].write_epoch(cur_epoch)
-        if is_ckpt_epoch(cur_epoch):
-            save_ckpt(model, optimizer, scheduler, cur_epoch)
-    for logger in loggers:
-        logger.close()
-    if cfg.train.ckpt_clean:
-        clean_ckpt()
+    callbacks = []
+    if logger:
+        callbacks.append(LoggerCallback())
+    if cfg.train.enable_ckpt:
+        ckpt_cbk = pl.callbacks.ModelCheckpoint(dirpath=get_ckpt_dir())
+        callbacks.append(ckpt_cbk)
 
-    logging.info('Task done, results saved in {}'.format(cfg.run_dir))
+    trainer_config = trainer_config or {}
+    trainer = pl.Trainer(
+        **trainer_config,
+        enable_checkpointing=cfg.train.enable_ckpt,
+        callbacks=callbacks,
+        default_root_dir=cfg.out_dir,
+        max_epochs=cfg.optim.max_epoch,
+        accelerator=cfg.accelerator,
+        devices='auto' if not torch.cuda.is_available() else cfg.devices,
+    )
+
+    trainer.fit(model, datamodule=datamodule)
+    trainer.test(model, datamodule=datamodule)

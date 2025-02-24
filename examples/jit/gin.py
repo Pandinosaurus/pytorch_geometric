@@ -2,11 +2,13 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Sequential, Linear, ReLU, BatchNorm1d as BatchNorm
-from torch_geometric.transforms import OneHotDegree
+from torch.nn import BatchNorm1d as BatchNorm
+from torch.nn import Linear, ReLU, Sequential
+
 from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GINConv, global_add_pool
+from torch_geometric.transforms import OneHotDegree
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', '..', 'data', 'TU')
 dataset = TUDataset(path, name='IMDB-BINARY', transform=OneHotDegree(135))
@@ -17,9 +19,9 @@ test_loader = DataLoader(test_dataset, batch_size=128)
 train_loader = DataLoader(train_dataset, batch_size=128)
 
 
-class Net(torch.nn.Module):
+class GIN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers):
-        super(Net, self).__init__()
+        super().__init__()
 
         self.convs = torch.nn.ModuleList()
         self.batch_norms = torch.nn.ModuleList()
@@ -31,7 +33,7 @@ class Net(torch.nn.Module):
                 ReLU(),
                 Linear(2 * hidden_channels, hidden_channels),
             )
-            conv = GINConv(mlp, train_eps=True).jittable()
+            conv = GINConv(mlp, train_eps=True)
 
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(hidden_channels))
@@ -53,7 +55,7 @@ class Net(torch.nn.Module):
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = Net(dataset.num_features, 64, dataset.num_classes, num_layers=3)
+model = GIN(dataset.num_features, 64, dataset.num_classes, num_layers=3)
 model = model.to(device)
 model = torch.jit.script(model)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)

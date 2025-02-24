@@ -1,11 +1,13 @@
 from typing import Dict, List, Optional, Tuple
-from torch_geometric.typing import NodeType, EdgeType, OptTensor
 
 import torch
 from torch import Tensor
 from torch.nn import Embedding
 from torch.utils.data import DataLoader
-from torch_sparse import SparseTensor
+
+from torch_geometric.index import index2ptr
+from torch_geometric.typing import EdgeType, NodeType, OptTensor
+from torch_geometric.utils import sort_edge_index
 
 EPS = 1e-15
 
@@ -26,10 +28,10 @@ class MetaPath2Vec(torch.nn.Module):
         hetero/metapath2vec.py>`_.
 
     Args:
-        edge_index_dict (Dict[Tuple[str, str, str], Tensor]): Dictionary
+        edge_index_dict (Dict[Tuple[str, str, str], torch.Tensor]): Dictionary
             holding edge indices for each
-            :obj:`(src_node_type, rel_type, dst_node_type)` present in the
-            heterogeneous graph.
+            :obj:`(src_node_type, rel_type, dst_node_type)` edge type present
+            in the heterogeneous graph.
         embedding_dim (int): The size of each embedding vector.
         metapath (List[Tuple[str, str, str]]): The metapath described as a list
             of :obj:`(src_node_type, rel_type, dst_node_type)` tuples.
@@ -71,17 +73,28 @@ class MetaPath2Vec(torch.nn.Module):
                 N = int(edge_index[1].max() + 1)
                 num_nodes_dict[key] = max(N, num_nodes_dict.get(key, N))
 
-        adj_dict = {}
+        self.rowptr_dict, self.col_dict, self.rowcount_dict = {}, {}, {}
         for keys, edge_index in edge_index_dict.items():
             sizes = (num_nodes_dict[keys[0]], num_nodes_dict[keys[-1]])
-            row, col = edge_index
-            adj = SparseTensor(row=row, col=col, sparse_sizes=sizes)
-            adj = adj.to('cpu')
-            adj_dict[keys] = adj
+            row, col = sort_edge_index(edge_index, num_nodes=max(sizes)).cpu()
+            rowptr = index2ptr(row, size=sizes[0])
+            self.rowptr_dict[keys] = rowptr
+            self.col_dict[keys] = col
+            self.rowcount_dict[keys] = rowptr[1:] - rowptr[:-1]
 
-        assert walk_length >= context_size
+        for edge_type1, edge_type2 in zip(metapath[:-1], metapath[1:]):
+            if edge_type1[-1] != edge_type2[0]:
+                raise ValueError(
+                    "Found invalid metapath. Ensure that the destination node "
+                    "type matches with the source node type across all "
+                    "consecutive edge types.")
 
-        self.adj_dict = adj_dict
+        assert walk_length + 1 >= context_size
+        if walk_length > len(metapath) and metapath[0][0] != metapath[-1][-1]:
+            raise AttributeError(
+                "The 'walk_length' is longer than the given 'metapath', but "
+                "the 'metapath' does not denote a cycle")
+
         self.embedding_dim = embedding_dim
         self.metapath = metapath
         self.walk_length = walk_length
@@ -90,7 +103,7 @@ class MetaPath2Vec(torch.nn.Module):
         self.num_negative_samples = num_negative_samples
         self.num_nodes_dict = num_nodes_dict
 
-        types = set([x[0] for x in metapath]) | set([x[-1] for x in metapath])
+        types = {x[0] for x in metapath} | {x[-1] for x in metapath}
         types = sorted(list(types))
 
         count = 0
@@ -107,18 +120,22 @@ class MetaPath2Vec(torch.nn.Module):
         assert len(offset) == walk_length + 1
         self.offset = torch.tensor(offset)
 
-        self.embedding = Embedding(count, embedding_dim, sparse=sparse)
+        # + 1 denotes a dummy node used to link to for isolated nodes.
+        self.embedding = Embedding(count + 1, embedding_dim, sparse=sparse)
+        self.dummy_idx = count
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        r"""Resets all learnable parameters of the module."""
         self.embedding.reset_parameters()
 
     def forward(self, node_type: str, batch: OptTensor = None) -> Tensor:
         r"""Returns the embeddings for the nodes in :obj:`batch` of type
-        :obj:`node_type`."""
+        :obj:`node_type`.
+        """
         emb = self.embedding.weight[self.start[node_type]:self.end[node_type]]
-        return emb if batch is None else emb[batch]
+        return emb if batch is None else emb.index_select(0, batch)
 
     def loader(self, **kwargs):
         r"""Returns the data loader that creates both positive and negative
@@ -138,13 +155,20 @@ class MetaPath2Vec(torch.nn.Module):
 
         rws = [batch]
         for i in range(self.walk_length):
-            keys = self.metapath[i % len(self.metapath)]
-            adj = self.adj_dict[keys]
-            batch = adj.sample(num_neighbors=1, subset=batch).squeeze()
+            edge_type = self.metapath[i % len(self.metapath)]
+            batch = sample(
+                self.rowptr_dict[edge_type],
+                self.col_dict[edge_type],
+                self.rowcount_dict[edge_type],
+                batch,
+                num_neighbors=1,
+                dummy_idx=self.dummy_idx,
+            ).view(-1)
             rws.append(batch)
 
         rw = torch.stack(rws, dim=-1)
         rw.add_(self.offset.view(1, -1))
+        rw[rw > self.dummy_idx] = self.dummy_idx
 
         walks = []
         num_walks_per_rw = 1 + self.walk_length + 1 - self.context_size
@@ -172,12 +196,12 @@ class MetaPath2Vec(torch.nn.Module):
         return torch.cat(walks, dim=0)
 
     def _sample(self, batch: List[int]) -> Tuple[Tensor, Tensor]:
-        batch = torch.tensor(batch, dtype=torch.long)
+        if not isinstance(batch, Tensor):
+            batch = torch.tensor(batch, dtype=torch.long)
         return self._pos_sample(batch), self._neg_sample(batch)
 
     def loss(self, pos_rw: Tensor, neg_rw: Tensor) -> Tensor:
         r"""Computes the loss given positive and negative random walks."""
-
         # Positive loss.
         start, rest = pos_rw[:, 0], pos_rw[:, 1:].contiguous()
 
@@ -203,18 +227,36 @@ class MetaPath2Vec(torch.nn.Module):
         return pos_loss + neg_loss
 
     def test(self, train_z: Tensor, train_y: Tensor, test_z: Tensor,
-             test_y: Tensor, solver: str = 'lbfgs', multi_class: str = 'auto',
-             *args, **kwargs) -> float:
+             test_y: Tensor, solver: str = "lbfgs", *args, **kwargs) -> float:
         r"""Evaluates latent space quality via a logistic regression downstream
-        task."""
+        task.
+        """
         from sklearn.linear_model import LogisticRegression
 
-        clf = LogisticRegression(solver=solver, multi_class=multi_class, *args,
+        clf = LogisticRegression(solver=solver, *args,
                                  **kwargs).fit(train_z.detach().cpu().numpy(),
                                                train_y.detach().cpu().numpy())
         return clf.score(test_z.detach().cpu().numpy(),
                          test_y.detach().cpu().numpy())
 
     def __repr__(self) -> str:
-        return (f'{self.__class__.__name__}({self.embedding.weight.size(0)}, '
+        return (f'{self.__class__.__name__}('
+                f'{self.embedding.weight.size(0) - 1}, '
                 f'{self.embedding.weight.size(1)})')
+
+
+def sample(rowptr: Tensor, col: Tensor, rowcount: Tensor, subset: Tensor,
+           num_neighbors: int, dummy_idx: int) -> Tensor:
+
+    mask = subset >= dummy_idx
+    subset = subset.clamp(min=0, max=rowptr.numel() - 2)
+    count = rowcount[subset]
+
+    rand = torch.rand((subset.size(0), num_neighbors), device=subset.device)
+    rand *= count.to(rand.dtype).view(-1, 1)
+    rand = rand.to(torch.long) + rowptr[subset].view(-1, 1)
+    rand = rand.clamp(max=col.numel() - 1)  # If last node is isolated.
+
+    col = col[rand] if col.numel() > 0 else rand
+    col[mask | (count == 0)] = dummy_idx
+    return col

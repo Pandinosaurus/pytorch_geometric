@@ -1,19 +1,19 @@
-from typing import Union, Tuple
-from torch_geometric.typing import OptPairTensor, Adj, OptTensor, Size
+from typing import Tuple, Union
 
 import torch
 from torch import Tensor
 from torch.nn import Parameter
+
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
-
-from ..inits import zeros, glorot
+from torch_geometric.nn.inits import glorot, zeros
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
 
 
 class GMMConv(MessagePassing):
     r"""The gaussian mixture model convolutional operator from the `"Geometric
     Deep Learning on Graphs and Manifolds using Mixture Model CNNs"
-    <https://arxiv.org/abs/1611.08402>`_ paper
+    <https://arxiv.org/abs/1611.08402>`_ paper.
 
     .. math::
         \mathbf{x}^{\prime}_i = \frac{1}{|\mathcal{N}(i)|}
@@ -49,7 +49,7 @@ class GMMConv(MessagePassing):
         separate_gaussians (bool, optional): If set to :obj:`True`, will
             learn separate GMMs for every pair of input and output channel,
             inspired by traditional CNNs. (default: :obj:`False`)
-        aggr (string, optional): The aggregation operator to use
+        aggr (str, optional): The aggregation operator to use
             (:obj:`"add"`, :obj:`"mean"`, :obj:`"max"`).
             (default: :obj:`"mean"`)
         root_weight (bool, optional): If set to :obj:`False`, the layer will
@@ -59,12 +59,22 @@ class GMMConv(MessagePassing):
             an additive bias. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})` or
+          :math:`((|\mathcal{V_s}|, F_{s}), (|\mathcal{V_t}|, F_{t}))`
+          if bipartite,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge features :math:`(|\mathcal{E}|, D)` *(optional)*
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})` or
+          :math:`(|\mathcal{V}_t|, F_{out})` if bipartite
     """
     def __init__(self, in_channels: Union[int, Tuple[int, int]],
                  out_channels: int, dim: int, kernel_size: int,
                  separate_gaussians: bool = False, aggr: str = 'mean',
                  root_weight: bool = True, bias: bool = True, **kwargs):
-        super(GMMConv, self).__init__(aggr=aggr, **kwargs)
+        super().__init__(aggr=aggr, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -101,13 +111,14 @@ class GMMConv(MessagePassing):
                                weight_initializer='glorot')
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
+            self.bias = Parameter(torch.empty(out_channels))
         else:
             self.register_parameter('bias', None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         if not isinstance(self.g, torch.nn.UninitializedParameter):
             glorot(self.g)
             glorot(self.mu)
@@ -118,9 +129,9 @@ class GMMConv(MessagePassing):
 
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None, size: Size = None):
-        """"""
+
         if isinstance(x, Tensor):
-            x: OptPairTensor = (x, x)
+            x = (x, x)
 
         # propagate_type: (x: OptPairTensor, edge_attr: OptTensor)
         if not self.separate_gaussians:
@@ -133,14 +144,14 @@ class GMMConv(MessagePassing):
 
         x_r = x[1]
         if x_r is not None and self.root is not None:
-            out += self.root(x_r)
+            out = out + self.root(x_r)
 
         if self.bias is not None:
-            out += self.bias
+            out = out + self.bias
 
         return out
 
-    def message(self, x_j: Tensor, edge_attr: Tensor):
+    def message(self, x_j: Tensor, edge_attr: Tensor) -> Tensor:
         EPS = 1e-15
         F, M = self.rel_in_channels, self.out_channels
         (E, D), K = edge_attr.size(), self.kernel_size
@@ -187,6 +198,5 @@ class GMMConv(MessagePassing):
         delattr(module, '_hook')
 
     def __repr__(self) -> str:
-        return '{}({}, {}, dim={})'.format(self.__class__.__name__,
-                                           self.in_channels, self.out_channels,
-                                           self.dim)
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, dim={self.dim})')

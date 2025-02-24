@@ -1,37 +1,64 @@
+import os.path as osp
+from typing import Callable
+
 import torch
-from torch_geometric.loader import DataLoader
 
-from torch_geometric.datasets import Planetoid, TUDataset, KarateClub, \
-    Coauthor, Amazon, MNISTSuperpixels, PPI, QM7b
-import torch_geometric.transforms as T
-
-from torch_geometric.graphgym.config import cfg
 import torch_geometric.graphgym.register as register
-from torch_geometric.graphgym.models.transform import create_link_label, \
-    neg_sampling_transform
+import torch_geometric.transforms as T
+from torch_geometric.datasets import (
+    PPI,
+    Amazon,
+    Coauthor,
+    KarateClub,
+    MNISTSuperpixels,
+    Planetoid,
+    QM7b,
+    TUDataset,
+)
+from torch_geometric.graphgym.config import cfg
+from torch_geometric.graphgym.models.transform import (
+    create_link_label,
+    neg_sampling_transform,
+)
+from torch_geometric.loader import (
+    ClusterLoader,
+    DataLoader,
+    GraphSAINTEdgeSampler,
+    GraphSAINTNodeSampler,
+    GraphSAINTRandomWalkSampler,
+    NeighborSampler,
+    RandomNodeLoader,
+)
+from torch_geometric.utils import (
+    index_to_mask,
+    negative_sampling,
+    to_undirected,
+)
 
-from torch_geometric.utils import to_undirected
-from torch_geometric.loader import (GraphSAINTNodeSampler,
-                                    GraphSAINTEdgeSampler,
-                                    GraphSAINTRandomWalkSampler)
-from torch_geometric.loader import ClusterLoader
-from torch_geometric.loader import RandomNodeSampler
-from torch_geometric.loader import NeighborSampler
-from torch_geometric.utils import negative_sampling
+index2mask = index_to_mask  # TODO Backward compatibility
+
+
+def planetoid_dataset(name: str) -> Callable:
+    return lambda root: Planetoid(root, name)
+
+
+register.register_dataset('Cora', planetoid_dataset('Cora'))
+register.register_dataset('CiteSeer', planetoid_dataset('CiteSeer'))
+register.register_dataset('PubMed', planetoid_dataset('PubMed'))
+register.register_dataset('PPI', PPI)
 
 
 def load_pyg(name, dataset_dir):
-    """
-    Load PyG dataset objects. (More PyG datasets will be supported)
+    """Load PyG dataset objects. (More PyG datasets will be supported).
 
     Args:
-        name (string): dataset name
-        dataset_dir (string): data directory
+        name (str): dataset name
+        dataset_dir (str): data directory
 
     Returns: PyG dataset object
 
     """
-    dataset_dir = '{}/{}'.format(dataset_dir, name)
+    dataset_dir = osp.join(dataset_dir, name)
     if name in ['Cora', 'CiteSeer', 'PubMed']:
         dataset = Planetoid(dataset_dir, name)
     elif name[:3] == 'TU_':
@@ -60,15 +87,9 @@ def load_pyg(name, dataset_dir):
     elif name == 'QM7b':
         dataset = QM7b(dataset_dir)
     else:
-        raise ValueError('{} not support'.format(name))
+        raise ValueError(f"'{name}' not support")
 
     return dataset
-
-
-def index2mask(index, size):
-    mask = torch.zeros(size, dtype=torch.bool)
-    mask[index] = 1
-    return mask
 
 
 def set_dataset_attr(dataset, name, value, size):
@@ -79,30 +100,27 @@ def set_dataset_attr(dataset, name, value, size):
 
 
 def load_ogb(name, dataset_dir):
-    r"""
-
-    Load OGB dataset objects.
-
+    r"""Load OGB dataset objects.
 
     Args:
-        name (string): dataset name
-        dataset_dir (string): data directory
+        name (str): dataset name
+        dataset_dir (str): data directory
 
     Returns: PyG dataset object
 
     """
-    from ogb.nodeproppred import PygNodePropPredDataset
-    from ogb.linkproppred import PygLinkPropPredDataset
     from ogb.graphproppred import PygGraphPropPredDataset
+    from ogb.linkproppred import PygLinkPropPredDataset
+    from ogb.nodeproppred import PygNodePropPredDataset
 
     if name[:4] == 'ogbn':
         dataset = PygNodePropPredDataset(name=name, root=dataset_dir)
         splits = dataset.get_idx_split()
         split_names = ['train_mask', 'val_mask', 'test_mask']
         for i, key in enumerate(splits.keys()):
-            mask = index2mask(splits[key], size=dataset.data.y.shape[0])
+            mask = index_to_mask(splits[key], size=dataset._data.y.shape[0])
             set_dataset_attr(dataset, split_names[i], mask, len(mask))
-        edge_index = to_undirected(dataset.data.edge_index)
+        edge_index = to_undirected(dataset._data.edge_index)
         set_dataset_attr(dataset, 'edge_index', edge_index,
                          edge_index.shape[1])
 
@@ -125,7 +143,7 @@ def load_ogb(name, dataset_dir):
             dataset.transform = neg_sampling_transform
         else:
             id_neg = negative_sampling(edge_index=id,
-                                       num_nodes=dataset.data.num_nodes,
+                                       num_nodes=dataset._data.num_nodes,
                                        num_neg_samples=id.shape[1])
             id_all = torch.cat([id, id_neg], dim=-1)
             label = create_link_label(id, id_neg)
@@ -151,9 +169,7 @@ def load_ogb(name, dataset_dir):
 
 
 def load_dataset():
-    r"""
-
-    Load dataset objects.
+    r"""Load dataset objects.
 
     Returns: PyG dataset object
 
@@ -173,47 +189,44 @@ def load_dataset():
     elif format == 'OGB':
         dataset = load_ogb(name.replace('_', '-'), dataset_dir)
     else:
-        raise ValueError('Unknown data format: {}'.format(format))
+        raise ValueError(f"Unknown data format '{format}'")
     return dataset
 
 
 def set_dataset_info(dataset):
-    r"""
-    Set global dataset information
+    r"""Set global dataset information.
 
     Args:
         dataset: PyG dataset object
 
     """
-
     # get dim_in and dim_out
     try:
-        cfg.share.dim_in = dataset.data.x.shape[1]
+        cfg.share.dim_in = dataset._data.x.shape[1]
     except Exception:
         cfg.share.dim_in = 1
     try:
         if cfg.dataset.task_type == 'classification':
-            cfg.share.dim_out = torch.unique(dataset.data.y).shape[0]
+            cfg.share.dim_out = torch.unique(dataset._data.y).shape[0]
         else:
-            cfg.share.dim_out = dataset.data.y.shape[1]
+            cfg.share.dim_out = dataset._data.y.shape[1]
     except Exception:
         cfg.share.dim_out = 1
 
     # count number of dataset splits
     cfg.share.num_splits = 1
-    for key in dataset.data.keys:
+    for key in dataset._data.keys():
         if 'val' in key:
             cfg.share.num_splits += 1
             break
-    for key in dataset.data.keys:
+    for key in dataset._data.keys():
         if 'test' in key:
             cfg.share.num_splits += 1
             break
 
 
 def create_dataset():
-    r"""
-    Create dataset object
+    r"""Create dataset object.
 
     Returns: PyG dataset object
 
@@ -225,21 +238,22 @@ def create_dataset():
 
 
 def get_loader(dataset, sampler, batch_size, shuffle=True):
+    pw = cfg.num_workers > 0
     if sampler == "full_batch" or len(dataset) > 1:
         loader_train = DataLoader(dataset, batch_size=batch_size,
                                   shuffle=shuffle, num_workers=cfg.num_workers,
-                                  pin_memory=True)
+                                  pin_memory=True, persistent_workers=pw)
     elif sampler == "neighbor":
         loader_train = NeighborSampler(
             dataset[0], sizes=cfg.train.neighbor_sizes[:cfg.gnn.layers_mp],
             batch_size=batch_size, shuffle=shuffle,
             num_workers=cfg.num_workers, pin_memory=True)
     elif sampler == "random_node":
-        loader_train = RandomNodeSampler(dataset[0],
-                                         num_parts=cfg.train.train_parts,
-                                         shuffle=shuffle,
-                                         num_workers=cfg.num_workers,
-                                         pin_memory=True)
+        loader_train = RandomNodeLoader(dataset[0],
+                                        num_parts=cfg.train.train_parts,
+                                        shuffle=shuffle,
+                                        num_workers=cfg.num_workers,
+                                        pin_memory=True, persistent_workers=pw)
     elif sampler == "saint_rw":
         loader_train = \
             GraphSAINTRandomWalkSampler(dataset[0],
@@ -249,40 +263,47 @@ def get_loader(dataset, sampler, batch_size, shuffle=True):
                                         sample_coverage=0,
                                         shuffle=shuffle,
                                         num_workers=cfg.num_workers,
-                                        pin_memory=True)
+                                        pin_memory=True,
+                                        persistent_workers=pw)
     elif sampler == "saint_node":
         loader_train = \
             GraphSAINTNodeSampler(dataset[0], batch_size=batch_size,
                                   num_steps=cfg.train.iter_per_epoch,
                                   sample_coverage=0, shuffle=shuffle,
                                   num_workers=cfg.num_workers,
-                                  pin_memory=True)
+                                  pin_memory=True,
+                                  persistent_workers=pw)
     elif sampler == "saint_edge":
         loader_train = \
             GraphSAINTEdgeSampler(dataset[0], batch_size=batch_size,
                                   num_steps=cfg.train.iter_per_epoch,
                                   sample_coverage=0, shuffle=shuffle,
                                   num_workers=cfg.num_workers,
-                                  pin_memory=True)
+                                  pin_memory=True,
+                                  persistent_workers=pw)
     elif sampler == "cluster":
-        loader_train = \
-            ClusterLoader(dataset[0],
-                          num_parts=cfg.train.train_parts,
-                          save_dir="{}/{}".format(cfg.dataset.dir,
-                                                  cfg.dataset.name.replace(
-                                                      "-", "_")),
-                          batch_size=batch_size, shuffle=shuffle,
-                          num_workers=cfg.num_workers,
-                          pin_memory=True)
+        loader_train = ClusterLoader(
+            dataset[0],
+            num_parts=cfg.train.train_parts,
+            save_dir=osp.join(
+                cfg.dataset.dir,
+                cfg.dataset.name.replace("-", "_"),
+            ),
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=cfg.num_workers,
+            pin_memory=True,
+            persistent_workers=pw,
+        )
 
     else:
-        raise NotImplementedError("%s sampler is not implemented!" % sampler)
+        raise NotImplementedError(f"'{sampler}' is not implemented")
+
     return loader_train
 
 
 def create_loader():
-    """
-    Create data loader object
+    """Create data loader object.
 
     Returns: List of PyTorch data loaders
 

@@ -5,12 +5,12 @@ import torch
 import torch.nn.functional as F
 from rdkit import Chem
 
-from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import MoleculeNet
+from torch_geometric.loader import DataLoader
 from torch_geometric.nn.models import AttentiveFP
 
 
-class GenFeatures(object):
+class GenFeatures:
     def __init__(self):
         self.symbols = [
             'B', 'C', 'N', 'O', 'F', 'Si', 'P', 'S', 'Cl', 'As', 'Se', 'Br',

@@ -1,17 +1,19 @@
-from typing import Optional, Tuple
-from torch_geometric.typing import Adj, OptTensor
+from typing import Optional
 
-from torch import Tensor
 import torch.nn.functional as F
-from torch_sparse import SparseTensor, matmul
+from torch import Tensor
+
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, SparseTensor
+from torch_geometric.utils import is_torch_sparse_tensor, spmm, to_edge_index
+from torch_geometric.utils.sparse import set_sparse_value
 
 
 class APPNP(MessagePassing):
     r"""The approximate personalized propagation of neural predictions layer
     from the `"Predict then Propagate: Graph Neural Networks meet Personalized
-    PageRank" <https://arxiv.org/abs/1810.05997>`_ paper
+    PageRank" <https://arxiv.org/abs/1810.05997>`_ paper.
 
     .. math::
         \mathbf{X}^{(0)} &= \mathbf{X}
@@ -45,15 +47,22 @@ class APPNP(MessagePassing):
             symmetric normalization. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F)`,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge weights :math:`(|\mathcal{E}|)` *(optional)*
+        - **output:** node features :math:`(|\mathcal{V}|, F)`
     """
-    _cached_edge_index: Optional[Tuple[Tensor, Tensor]]
+    _cached_edge_index: Optional[OptPairTensor]
     _cached_adj_t: Optional[SparseTensor]
 
     def __init__(self, K: int, alpha: float, dropout: float = 0.,
                  cached: bool = False, add_self_loops: bool = True,
                  normalize: bool = True, **kwargs):
         kwargs.setdefault('aggr', 'add')
-        super(APPNP, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.K = K
         self.alpha = alpha
         self.dropout = dropout
@@ -65,19 +74,24 @@ class APPNP(MessagePassing):
         self._cached_adj_t = None
 
     def reset_parameters(self):
+        super().reset_parameters()
         self._cached_edge_index = None
         self._cached_adj_t = None
 
-    def forward(self, x: Tensor, edge_index: Adj,
-                edge_weight: OptTensor = None) -> Tensor:
-        """"""
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Adj,
+        edge_weight: OptTensor = None,
+    ) -> Tensor:
+
         if self.normalize:
             if isinstance(edge_index, Tensor):
                 cache = self._cached_edge_index
                 if cache is None:
                     edge_index, edge_weight = gcn_norm(  # yapf: disable
                         edge_index, edge_weight, x.size(self.node_dim), False,
-                        self.add_self_loops, dtype=x.dtype)
+                        self.add_self_loops, self.flow, dtype=x.dtype)
                     if self.cached:
                         self._cached_edge_index = (edge_index, edge_weight)
                 else:
@@ -88,7 +102,7 @@ class APPNP(MessagePassing):
                 if cache is None:
                     edge_index = gcn_norm(  # yapf: disable
                         edge_index, edge_weight, x.size(self.node_dim), False,
-                        self.add_self_loops, dtype=x.dtype)
+                        self.add_self_loops, self.flow, dtype=x.dtype)
                     if self.cached:
                         self._cached_adj_t = edge_index
                 else:
@@ -98,8 +112,13 @@ class APPNP(MessagePassing):
         for k in range(self.K):
             if self.dropout > 0 and self.training:
                 if isinstance(edge_index, Tensor):
-                    assert edge_weight is not None
-                    edge_weight = F.dropout(edge_weight, p=self.dropout)
+                    if is_torch_sparse_tensor(edge_index):
+                        _, edge_weight = to_edge_index(edge_index)
+                        edge_weight = F.dropout(edge_weight, p=self.dropout)
+                        edge_index = set_sparse_value(edge_index, edge_weight)
+                    else:
+                        assert edge_weight is not None
+                        edge_weight = F.dropout(edge_weight, p=self.dropout)
                 else:
                     value = edge_index.storage.value()
                     assert value is not None
@@ -107,19 +126,17 @@ class APPNP(MessagePassing):
                     edge_index = edge_index.set_value(value, layout='coo')
 
             # propagate_type: (x: Tensor, edge_weight: OptTensor)
-            x = self.propagate(edge_index, x=x, edge_weight=edge_weight,
-                               size=None)
+            x = self.propagate(edge_index, x=x, edge_weight=edge_weight)
             x = x * (1 - self.alpha)
-            x += self.alpha * h
+            x = x + self.alpha * h
 
         return x
 
-    def message(self, x_j: Tensor, edge_weight: Tensor) -> Tensor:
-        return edge_weight.view(-1, 1) * x_j
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
 
-    def message_and_aggregate(self, adj_t: SparseTensor, x: Tensor) -> Tensor:
-        return matmul(adj_t, x, reduce=self.aggr)
+    def message_and_aggregate(self, adj_t: Adj, x: Tensor) -> Tensor:
+        return spmm(adj_t, x, reduce=self.aggr)
 
-    def __repr__(self):
-        return '{}(K={}, alpha={})'.format(self.__class__.__name__, self.K,
-                                           self.alpha)
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}(K={self.K}, alpha={self.alpha})'

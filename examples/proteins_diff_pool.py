@@ -1,25 +1,25 @@
 import os.path as osp
+import time
 from math import ceil
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.datasets import TUDataset
+
 import torch_geometric.transforms as T
+from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DenseDataLoader
 from torch_geometric.nn import DenseSAGEConv, dense_diff_pool
 
 max_nodes = 150
 
-
-class MyFilter(object):
-    def __call__(self, data):
-        return data.num_nodes <= max_nodes
-
-
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data',
                 'PROTEINS_dense')
-dataset = TUDataset(path, name='PROTEINS', transform=T.ToDense(max_nodes),
-                    pre_filter=MyFilter())
+dataset = TUDataset(
+    path,
+    name='PROTEINS',
+    transform=T.ToDense(max_nodes),
+    pre_filter=lambda data: data.num_nodes <= max_nodes,
+)
 dataset = dataset.shuffle()
 n = (len(dataset) + 9) // 10
 test_dataset = dataset[:n]
@@ -33,7 +33,7 @@ train_loader = DenseDataLoader(train_dataset, batch_size=20)
 class GNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels,
                  normalize=False, lin=True):
-        super(GNN, self).__init__()
+        super().__init__()
 
         self.conv1 = DenseSAGEConv(in_channels, hidden_channels, normalize)
         self.bn1 = torch.nn.BatchNorm1d(hidden_channels)
@@ -52,7 +52,7 @@ class GNN(torch.nn.Module):
         batch_size, num_nodes, num_channels = x.size()
 
         x = x.view(-1, num_channels)
-        x = getattr(self, 'bn{}'.format(i))(x)
+        x = getattr(self, f'bn{i}')(x)
         x = x.view(batch_size, num_nodes, num_channels)
         return x
 
@@ -60,21 +60,21 @@ class GNN(torch.nn.Module):
         batch_size, num_nodes, in_channels = x.size()
 
         x0 = x
-        x1 = self.bn(1, F.relu(self.conv1(x0, adj, mask)))
-        x2 = self.bn(2, F.relu(self.conv2(x1, adj, mask)))
-        x3 = self.bn(3, F.relu(self.conv3(x2, adj, mask)))
+        x1 = self.bn(1, self.conv1(x0, adj, mask).relu())
+        x2 = self.bn(2, self.conv2(x1, adj, mask).relu())
+        x3 = self.bn(3, self.conv3(x2, adj, mask).relu())
 
         x = torch.cat([x1, x2, x3], dim=-1)
 
         if self.lin is not None:
-            x = F.relu(self.lin(x))
+            x = self.lin(x).relu()
 
         return x
 
 
 class Net(torch.nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
 
         num_nodes = ceil(0.25 * max_nodes)
         self.gnn1_pool = GNN(dataset.num_features, 64, num_nodes)
@@ -103,12 +103,18 @@ class Net(torch.nn.Module):
         x = self.gnn3_embed(x, adj)
 
         x = x.mean(dim=1)
-        x = F.relu(self.lin1(x))
+        x = self.lin1(x).relu()
         x = self.lin2(x)
         return F.log_softmax(x, dim=-1), l1 + l2, e1 + e2
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
 model = Net().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -123,7 +129,7 @@ def train(epoch):
         output, _, _ = model(data.x, data.adj, data.mask)
         loss = F.nll_loss(output, data.y.view(-1))
         loss.backward()
-        loss_all += data.y.size(0) * loss.item()
+        loss_all += data.y.size(0) * float(loss)
         optimizer.step()
     return loss_all / len(train_dataset)
 
@@ -136,12 +142,14 @@ def test(loader):
     for data in loader:
         data = data.to(device)
         pred = model(data.x, data.adj, data.mask)[0].max(dim=1)[1]
-        correct += pred.eq(data.y.view(-1)).sum().item()
+        correct += int(pred.eq(data.y.view(-1)).sum())
     return correct / len(loader.dataset)
 
 
 best_val_acc = test_acc = 0
+times = []
 for epoch in range(1, 151):
+    start = time.time()
     train_loss = train(epoch)
     val_acc = test(val_loader)
     if val_acc > best_val_acc:
@@ -149,3 +157,5 @@ for epoch in range(1, 151):
         best_val_acc = val_acc
     print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, '
           f'Val Acc: {val_acc:.4f}, Test Acc: {test_acc:.4f}')
+    times.append(time.time() - start)
+print(f"Median time per epoch: {torch.tensor(times).median():.4f}s")

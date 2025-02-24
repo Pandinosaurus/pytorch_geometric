@@ -1,69 +1,83 @@
 import datetime
-import sphinx_rtd_theme
-import doctest
+import os.path as osp
+import sys
+
+import pyg_sphinx_theme
+
 import torch_geometric
+
+author = 'PyG Team'
+project = 'pytorch_geometric'
+version = torch_geometric.__version__
+copyright = f'{datetime.datetime.now().year}, {author}'
+
+sys.path.append(osp.join(osp.dirname(pyg_sphinx_theme.__file__), 'extension'))
 
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
-    'sphinx.ext.doctest',
     'sphinx.ext.intersphinx',
     'sphinx.ext.mathjax',
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
-    'sphinx.ext.githubpages',
+    'sphinx_autodoc_typehints',
+    'sphinx_copybutton',
+    'nbsphinx',
+    'pyg',
 ]
 
-autosummary_generate = True
+html_theme = 'pyg_sphinx_theme'
+html_logo = ('https://raw.githubusercontent.com/pyg-team/pyg_sphinx_theme/'
+             'master/pyg_sphinx_theme/static/img/pyg_logo.png')
+html_favicon = ('https://raw.githubusercontent.com/pyg-team/pyg_sphinx_theme/'
+                'master/pyg_sphinx_theme/static/img/favicon.png')
+html_static_path = ['_static']
 templates_path = ['_templates']
 
-source_suffix = '.rst'
-master_doc = 'index'
-
-author = 'Matthias Fey'
-project = 'pytorch_geometric'
-copyright = '{}, {}'.format(datetime.datetime.now().year, author)
-
-version = torch_geometric.__version__
-release = torch_geometric.__version__
-
-html_theme = 'sphinx_rtd_theme'
-html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
-
-doctest_default_flags = doctest.NORMALIZE_WHITESPACE
+add_module_names = False
 autodoc_member_order = 'bysource'
-intersphinx_mapping = {'python': ('https://docs.python.org/', None)}
 
-html_theme_options = {
-    'collapse_navigation': False,
-    'display_version': True,
-    'logo_only': True,
-    'navigation_depth': 2,
+suppress_warnings = ['autodoc.import_object']
+
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/', None),
+    # 'numpy': ('http://docs.scipy.org/doc/numpy', None),
+    'pandas': ('http://pandas.pydata.org/pandas-docs/dev', None),
+    'torch': ('https://pytorch.org/docs/main', None),
 }
 
-html_logo = '_static/img/pyg2.png'
-html_static_path = ['_static']
-html_context = {'css_files': ['_static/css/custom.css']}
-rst_context = {'torch_geometric': torch_geometric}
+typehints_use_rtype = False
+typehints_defaults = 'comma'
 
-add_module_names = False
+nbsphinx_thumbnails = {
+    'tutorial/create_gnn': '_static/thumbnails/create_gnn.png',
+    'tutorial/heterogeneous': '_static/thumbnails/heterogeneous.png',
+    'tutorial/create_dataset': '_static/thumbnails/create_dataset.png',
+    'tutorial/load_csv': '_static/thumbnails/load_csv.png',
+    'tutorial/dataset_splitting': '_static/thumbnails/dataset_splitting.png',
+    'tutorial/neighbor_loader': '_static/thumbnails/neighbor_loader.png',
+    'tutorial/point_cloud': '_static/thumbnails/point_cloud.png',
+    'tutorial/explain': '_static/thumbnails/explain.png',
+    'tutorial/shallow_node_embeddings':
+    '_static/thumbnails/shallow_node_embeddings.png',
+    'tutorial/distributed_pyg': '_static/thumbnails/distributed_pyg.png',
+    'tutorial/multi_gpu_vanilla': '_static/thumbnails/multi_gpu_vanilla.png',
+    'tutorial/multi_node_multi_gpu_vanilla':
+    '_static/thumbnails/multi_gpu_vanilla.png',
+    'tutorial/graph_transformer': '_static/thumbnails/graph_transformer.png',
+}
+
+
+def rst_jinja_render(app, _, source):
+    if hasattr(app.builder, 'templates'):
+        rst_context = {'torch_geometric': torch_geometric}
+        source[0] = app.builder.templates.render_string(source[0], rst_context)
 
 
 def setup(app):
-    def skip(app, what, name, obj, skip, options):
-        members = [
-            '__init__',
-            '__repr__',
-            '__weakref__',
-            '__dict__',
-            '__module__',
-        ]
-        return True if name in members else skip
+    r"""Setup sphinx application."""
+    app.connect('source-read', rst_jinja_render)
+    app.add_js_file('js/version_alert.js')
 
-    def rst_jinja_render(app, docname, source):
-        src = source[0]
-        rendered = app.builder.templates.render_string(src, rst_context)
-        source[0] = rendered
-
-    app.connect('autodoc-skip-member', skip)
-    app.connect("source-read", rst_jinja_render)
+    # Do not drop type hints in signatures:
+    del app.events.listeners['autodoc-process-signature']

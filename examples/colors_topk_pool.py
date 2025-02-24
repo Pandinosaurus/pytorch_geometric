@@ -1,17 +1,21 @@
+import copy
 import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Sequential as Seq, Linear as Lin, ReLU
+from torch.nn import Linear as Lin
+from torch.nn import ReLU
+from torch.nn import Sequential as Seq
+
 from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GINConv, TopKPooling
-from torch_geometric.nn import global_add_pool
-from torch_scatter import scatter_mean
+from torch_geometric.nn import GINConv, TopKPooling, global_add_pool
+from torch_geometric.utils import scatter
 
 
-class HandleNodeAttention(object):
+class HandleNodeAttention:
     def __call__(self, data):
+        data = copy.copy(data)
         data.attn = torch.softmax(data.x[:, 0], dim=0)
         data.x = data.x[:, 1:]
         return data
@@ -28,7 +32,7 @@ test_loader = DataLoader(dataset[3000:], batch_size=60)
 
 class Net(torch.nn.Module):
     def __init__(self, in_channels):
-        super(Net, self).__init__()
+        super().__init__()
 
         self.conv1 = GINConv(Seq(Lin(in_channels, 64), ReLU(), Lin(64, 64)))
         self.pool1 = TopKPooling(in_channels, min_score=0.05)
@@ -51,7 +55,7 @@ class Net(torch.nn.Module):
 
         attn_loss = F.kl_div(torch.log(score + 1e-14), data.attn[perm],
                              reduction='none')
-        attn_loss = scatter_mean(attn_loss, batch)
+        attn_loss = scatter(attn_loss, batch, reduce='mean')
 
         return out, attn_loss, ratio
 
@@ -106,8 +110,8 @@ for epoch in range(1, 301):
     test_acc2 = test_correct[2500:5000].sum().item() / 2500
     test_acc3 = test_correct[5000:].sum().item() / 2500
 
-    print(('Epoch: {:03d}, Loss: {:.4f}, Train: {:.3f}, Val: {:.3f}, '
-           'Test Orig: {:.3f}, Test Large: {:.3f}, Test LargeC: {:.3f}, '
-           'Train/Val/Test Ratio={:.3f}/{:.3f}/{:.3f}').format(
-               epoch, loss, train_acc, val_acc, test_acc1, test_acc2,
-               test_acc3, train_ratio, val_ratio, test_ratio))
+    print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Train: {train_acc:.3f}, '
+          f'Val: {val_acc:.3f}, Test Orig: {test_acc1:.3f}, '
+          f'Test Large: {test_acc2:.3f}, Test LargeC: {test_acc3:.3f}, '
+          f'Train/Val/Test Ratio='
+          f'{train_ratio:.3f}/{val_ratio:.3f}/{test_ratio:.3f}')

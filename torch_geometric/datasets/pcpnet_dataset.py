@@ -1,9 +1,15 @@
 import os
 import os.path as osp
+from typing import Callable, Optional
 
 import torch
-from torch_geometric.data import (Data, InMemoryDataset, download_url,
-                                  extract_zip)
+
+from torch_geometric.data import (
+    Data,
+    InMemoryDataset,
+    download_url,
+    extract_zip,
+)
 from torch_geometric.io import read_txt_array
 
 
@@ -16,14 +22,14 @@ class PCPNetDataset(InMemoryDataset):
     features.
 
     Args:
-        root (string): Root directory where the dataset should be saved.
-        category (string): The training set category (one of :obj:`"NoNoise"`,
+        root (str): Root directory where the dataset should be saved.
+        category (str): The training set category (one of :obj:`"NoNoise"`,
             :obj:`"Noisy"`, :obj:`"VarDensity"`, :obj:`"NoisyAndVarDensity"`
             for :obj:`split="train"` or :obj:`split="val"`,
             or one of :obj:`"All"`, :obj:`"LowNoise"`, :obj:`"MedNoise"`,
             :obj:`"HighNoise", :obj:`"VarDensityStriped",
             :obj:`"VarDensityGradient"` for :obj:`split="test"`).
-        split (string): If :obj:`"train"`, loads the training dataset.
+        split (str, optional): If :obj:`"train"`, loads the training dataset.
             If :obj:`"val"`, loads the validation dataset.
             If :obj:`"test"`, loads the test dataset. (default: :obj:`"train"`)
         transform (callable, optional): A function/transform that takes in an
@@ -38,6 +44,8 @@ class PCPNetDataset(InMemoryDataset):
             :obj:`torch_geometric.data.Data` object and returns a boolean
             value, indicating whether the data object should be included in the
             final dataset. (default: :obj:`None`)
+        force_reload (bool, optional): Whether to re-process the dataset.
+            (default: :obj:`False`)
     """
 
     url = 'http://geometry.cs.ucl.ac.uk/projects/2018/pcpnet/pclouds.zip'
@@ -66,8 +74,16 @@ class PCPNetDataset(InMemoryDataset):
         'VarDensityGradient': 'testset_vardensity_gradient.txt'
     }
 
-    def __init__(self, root, category, split='train', transform=None,
-                 pre_transform=None, pre_filter=None):
+    def __init__(
+        self,
+        root: str,
+        category: str,
+        split: str = 'train',
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+        force_reload: bool = False,
+    ) -> None:
 
         assert split in ['train', 'val', 'test']
 
@@ -81,12 +97,12 @@ class PCPNetDataset(InMemoryDataset):
         self.category = category
         self.split = split
 
-        super(PCPNetDataset, self).__init__(root, transform, pre_transform,
-                                            pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        super().__init__(root, transform, pre_transform, pre_filter,
+                         force_reload=force_reload)
+        self.load(self.processed_paths[0])
 
     @property
-    def raw_file_names(self):
+    def raw_file_names(self) -> str:
         if self.split == 'train':
             return self.category_files_train[self.category]
         elif self.split == 'val':
@@ -95,17 +111,17 @@ class PCPNetDataset(InMemoryDataset):
             return self.category_files_test[self.category]
 
     @property
-    def processed_file_names(self):
+    def processed_file_names(self) -> str:
         return self.split + '_' + self.category + '.pt'
 
-    def download(self):
+    def download(self) -> None:
         path = download_url(self.url, self.raw_dir)
         extract_zip(path, self.raw_dir)
         os.unlink(path)
 
-    def process(self):
+    def process(self) -> None:
         path_file = self.raw_paths
-        with open(path_file[0], "r") as f:
+        with open(path_file[0]) as f:
             filenames = f.read().split('\n')[:-1]
         data_list = []
         for filename in filenames:
@@ -126,8 +142,8 @@ class PCPNetDataset(InMemoryDataset):
                 data = self.pre_transform(data)
             data_list.append(data)
 
-        torch.save(self.collate(data_list), self.processed_paths[0])
+        self.save(data_list, self.processed_paths[0])
 
-    def __repr__(self):
-        return '{}({}, category={})'.format(self.__class__.__name__, len(self),
-                                            self.category)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({len(self)}, '
+                f'category={self.category})')

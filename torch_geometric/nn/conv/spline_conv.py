@@ -1,28 +1,27 @@
 import warnings
-from typing import Union, Tuple, List
-from torch_geometric.typing import OptPairTensor, Adj, OptTensor, Size
+from typing import List, Tuple, Union
 
 import torch
-from torch import nn
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn import Parameter
-from torch_geometric.utils.repeat import repeat
+
+import torch_geometric.typing
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import uniform, zeros
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
+from torch_geometric.utils.repeat import repeat
 
-from ..inits import uniform, zeros
-
-try:
+if torch_geometric.typing.WITH_TORCH_SPLINE_CONV:
     from torch_spline_conv import spline_basis, spline_weighting
-except ImportError:
-    spline_basis = None
-    spline_weighting = None
+else:
+    spline_basis = spline_weighting = None
 
 
 class SplineConv(MessagePassing):
     r"""The spline-based convolutional operator from the `"SplineCNN: Fast
     Geometric Deep Learning with Continuous B-Spline Kernels"
-    <https://arxiv.org/abs/1711.08920>`_ paper
+    <https://arxiv.org/abs/1711.08920>`_ paper.
 
     .. math::
         \mathbf{x}^{\prime}_i = \frac{1}{|\mathcal{N}(i)|} \sum_{j \in
@@ -49,7 +48,7 @@ class SplineConv(MessagePassing):
             operator will use a closed B-spline basis in this dimension.
             (default :obj:`True`)
         degree (int, optional): B-spline basis degrees. (default: :obj:`1`)
-        aggr (string, optional): The aggregation operator to use
+        aggr (str, optional): The aggregation scheme to use
             (:obj:`"add"`, :obj:`"mean"`, :obj:`"max"`).
             (default: :obj:`"mean"`)
         root_weight (bool, optional): If set to :obj:`False`, the layer will
@@ -60,17 +59,20 @@ class SplineConv(MessagePassing):
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
     """
-    def __init__(self, in_channels: Union[int, Tuple[int, int]],
-                 out_channels: int,
-                 dim: int,
-                 kernel_size: Union[int, List[int]],
-                 is_open_spline: bool = True,
-                 degree: int = 1,
-                 aggr: str = 'mean',
-                 root_weight: bool = True,
-                 bias: bool = True,
-                 **kwargs):  # yapf: disable
-        super(SplineConv, self).__init__(aggr=aggr, **kwargs)
+    def __init__(
+        self,
+        in_channels: Union[int, Tuple[int, int]],
+        out_channels: int,
+        dim: int,
+        kernel_size: Union[int, List[int]],
+        is_open_spline: bool = True,
+        degree: int = 1,
+        aggr: str = 'mean',
+        root_weight: bool = True,
+        bias: bool = True,
+        **kwargs,
+    ):
+        super().__init__(aggr=aggr, **kwargs)
 
         if spline_basis is None:
             raise ImportError("'SplineConv' requires 'torch-spline-conv'")
@@ -95,7 +97,7 @@ class SplineConv(MessagePassing):
 
         if in_channels[0] > 0:
             self.weight = Parameter(
-                torch.Tensor(self.K, in_channels[0], out_channels))
+                torch.empty(self.K, in_channels[0], out_channels))
         else:
             self.weight = torch.nn.parameter.UninitializedParameter()
             self._hook = self.register_forward_pre_hook(
@@ -106,13 +108,14 @@ class SplineConv(MessagePassing):
                               weight_initializer='uniform')
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
+            self.bias = Parameter(torch.empty(out_channels))
         else:
             self.register_parameter('bias', None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         if not isinstance(self.weight, nn.UninitializedParameter):
             size = self.weight.size(0) * self.weight.size(1)
             uniform(size, self.weight)
@@ -122,9 +125,9 @@ class SplineConv(MessagePassing):
 
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None, size: Size = None) -> Tensor:
-        """"""
+
         if isinstance(x, Tensor):
-            x: OptPairTensor = (x, x)
+            x = (x, x)
 
         if not x[0].is_cuda:
             warnings.warn(
@@ -136,10 +139,10 @@ class SplineConv(MessagePassing):
 
         x_r = x[1]
         if x_r is not None and self.root_weight:
-            out += self.lin(x_r)
+            out = out + self.lin(x_r)
 
         if self.bias is not None:
-            out += self.bias
+            out = out + self.bias
 
         return out
 
@@ -159,7 +162,6 @@ class SplineConv(MessagePassing):
         module._hook.remove()
         delattr(module, '_hook')
 
-    def __repr__(self):
-        return '{}({}, {}, dim={})'.format(self.__class__.__name__,
-                                           self.in_channels, self.out_channels,
-                                           self.dim)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, dim={self.dim})')

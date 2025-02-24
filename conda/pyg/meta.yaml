@@ -1,36 +1,29 @@
 package:
   name: pyg
-  version: 2.0.1
+  version: 2.6.1
 
 source:
-  path: ../..
+  url: https://files.pythonhosted.org/packages/e8/81/e1b015494cb9e0bf4c47cc8426e49736120248733be0e22072a5628ae9ed/torch_geometric-2.6.1.tar.gz
 
 requirements:
   host:
     - pip
+    - flit-core
     - python {{ environ.get('PYTHON_VERSION') }}
 
-  run:
   run:
     - python {{ environ.get('PYTHON_VERSION') }}
     - {{ environ.get('CONDA_PYTORCH_CONSTRAINT') }}
     - {{ environ.get('CONDA_CUDATOOLKIT_CONSTRAINT') }}
-    - pytorch-scatter
-    - pytorch-sparse
-    - pytorch-cluster
-    - pytorch-spline-conv
-    - networkx>=2.4
+    - psutil
+    - fsspec
     - tqdm
     - jinja2
     - pyparsing
-    - yacs
-    - PyYAML
-    - scikit-learn
-    - python-louvain
-    - googledrivedownloader
-    - pandas
-    - requests
     - numpy
+    - scipy
+    - aiohttp
+    - requests
 
 build:
   string: py{{ environ.get('PYTHON_VERSION').replace('.', '') }}_torch_{{ environ['TORCH_VERSION'] }}_{{ environ['CUDA_VERSION'] }}
@@ -38,10 +31,6 @@ build:
 
 test:
   imports:
-    - torch_scatter
-    - torch_sparse
-    - torch_cluster
-    - torch_spline_conv
     - torch_geometric
     - torch_geometric.nn
     - torch_geometric.data

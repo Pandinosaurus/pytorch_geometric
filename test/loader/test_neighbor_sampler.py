@@ -1,24 +1,21 @@
-import sys
-import random
-import shutil
-import os.path as osp
-
-import torch
 import numpy as np
+import torch
 
-from torch_geometric.utils import erdos_renyi_graph
 from torch_geometric.loader import NeighborSampler
-from torch_geometric.datasets import Planetoid
-from torch_geometric.nn.conv import SAGEConv, GATConv
+from torch_geometric.nn.conv import GATConv, SAGEConv
+from torch_geometric.testing import onlyOnline, withPackage
+from torch_geometric.typing import SparseTensor
+from torch_geometric.utils import erdos_renyi_graph
 
 
-def test_neighbor_sampler():
-    torch.manual_seed(12345)
+@withPackage('torch_sparse')
+def test_neighbor_sampler_basic():
     edge_index = erdos_renyi_graph(num_nodes=10, edge_prob=0.5)
+    adj_t = SparseTensor.from_edge_index(edge_index, sparse_sizes=(10, 10)).t()
     E = edge_index.size(1)
 
     loader = NeighborSampler(edge_index, sizes=[2, 4], batch_size=2)
-    assert loader.__repr__() == 'NeighborSampler(sizes=[2, 4])'
+    assert str(loader) == 'NeighborSampler(sizes=[2, 4])'
     assert len(loader) == 5
 
     for batch_size, n_id, adjs in loader:
@@ -35,10 +32,25 @@ def test_neighbor_sampler():
     out = loader.sample([1, 2])
     assert len(out) == 3
 
+    loader = NeighborSampler(adj_t, sizes=[2, 4], batch_size=2)
 
-def test_neighbor_sampler_on_cora():
-    root = osp.join('/', 'tmp', str(random.randrange(sys.maxsize)))
-    dataset = Planetoid(root, 'Cora')
+    for batch_size, n_id, adjs in loader:
+        for (adj_t, e_id, size) in adjs:
+            assert adj_t.size(0) == size[1]
+            assert adj_t.size(1) == size[0]
+
+
+@withPackage('torch_sparse')
+def test_neighbor_sampler_invalid_kwargs():
+    # Ignore `collate_fn` and `dataset` arguments:
+    edge_index = torch.tensor([[0, 1], [1, 0]])
+    NeighborSampler(edge_index, sizes=[-1], collate_fn=None, dataset=None)
+
+
+@onlyOnline
+@withPackage('torch_sparse')
+def test_neighbor_sampler_on_cora(get_dataset):
+    dataset = get_dataset(name='Cora')
     data = dataset[0]
 
     batch = torch.arange(10)
@@ -47,7 +59,7 @@ def test_neighbor_sampler_on_cora():
 
     class SAGE(torch.nn.Module):
         def __init__(self, in_channels, out_channels):
-            super(SAGE, self).__init__()
+            super().__init__()
 
             self.convs = torch.nn.ModuleList()
             self.convs.append(SAGEConv(in_channels, 16))
@@ -70,11 +82,11 @@ def test_neighbor_sampler_on_cora():
     _, n_id, adjs = next(iter(loader))
     out1 = model.batch(data.x[n_id], adjs)
     out2 = model.full(data.x, data.edge_index)[batch]
-    assert torch.allclose(out1, out2)
+    assert torch.allclose(out1, out2, atol=1e-7)
 
     class GAT(torch.nn.Module):
         def __init__(self, in_channels, out_channels):
-            super(SAGE, self).__init__()
+            super().__init__()
 
             self.convs = torch.nn.ModuleList()
             self.convs.append(GATConv(in_channels, 16, heads=2))
@@ -95,6 +107,4 @@ def test_neighbor_sampler_on_cora():
     _, n_id, adjs = next(iter(loader))
     out1 = model.batch(data.x[n_id], adjs)
     out2 = model.full(data.x, data.edge_index)[batch]
-    assert torch.allclose(out1, out2)
-
-    shutil.rmtree(root)
+    assert torch.allclose(out1, out2, atol=1e-7)
