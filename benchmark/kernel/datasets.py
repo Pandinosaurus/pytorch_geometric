@@ -1,12 +1,13 @@
 import os.path as osp
 
 import torch
+
+import torch_geometric.transforms as T
 from torch_geometric.datasets import TUDataset
 from torch_geometric.utils import degree
-import torch_geometric.transforms as T
 
 
-class NormalizedDegree(object):
+class NormalizedDegree:
     def __init__(self, mean, std):
         self.mean = mean
         self.std = std

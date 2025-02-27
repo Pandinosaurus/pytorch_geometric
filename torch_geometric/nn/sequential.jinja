@@ -1,22 +1,22 @@
-from typing import *
-from torch_geometric.typing import *
+import typing
 
 import torch
 from torch import Tensor
-from torch_sparse import SparseTensor
+
+import torch_geometric.typing
+{% for module in modules %}
+from {{module}} import *
+{%- endfor %}
 
 
-class {{cls_name}}(torch.nn.Module):
-    def reset_parameters(self):
-        for module in self.children():
-            if hasattr(module, 'reset_parameters'):
-                module.reset_parameters()
+def forward(
+    self,
+{%- for param in signature.param_dict.values() %}
+    {{param.name}}: {{param.type_repr}},
+{%- endfor %}
+) -> {{signature.return_type_repr}}:
 
-    def forward(self, {{ input_args|join(', ') }}):
-        """"""{% for call in calls %}
-        {% for output in call[2] %}{{output}}{{ ", " if not loop.last }}{% endfor %} = self.module_{{loop.index - 1}}({% for input in call[1] %}{{input}}{{ ", " if not loop.last }}{% endfor %}){% endfor %}
-        return {% for output in calls[-1][2] %}{{output}}{{ ", " if not loop.last }}{% endfor %}
-
-    def __repr__(self) -> str:
-        return 'Sequential(\n{}\n)'.format('\n'.join(
-            [f'  ({i}): ' + str(getattr(self, f'module_{i}')) for i in range({{calls|length}})]))
+{%- for child in children %}
+    {{child.return_names|join(', ')}} = self.{{child.name}}({{child.param_names|join(', ')}})
+{%- endfor %}
+    return {{children[-1].return_names|join(', ')}}

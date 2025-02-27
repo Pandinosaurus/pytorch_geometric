@@ -1,18 +1,20 @@
-from typing import Union, Tuple, Callable
-from torch_geometric.typing import OptTensor, OptPairTensor, Adj, Size
+from typing import Callable, Tuple, Union
 
 import torch
 from torch import Tensor
 from torch.nn import Parameter
-from torch_geometric.nn.inits import reset, zeros
+
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import reset, zeros
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
 
 
 class NNConv(MessagePassing):
     r"""The continuous kernel-based convolutional operator from the
     `"Neural Message Passing for Quantum Chemistry"
     <https://arxiv.org/abs/1704.01212>`_ paper.
+
     This convolution is also known as the edge-conditioned convolution from the
     `"Dynamic Edge-Conditioned Filters in Convolutional Neural Networks on
     Graphs" <https://arxiv.org/abs/1704.02901>`_ paper (see
@@ -37,7 +39,7 @@ class NNConv(MessagePassing):
             num_edge_features]` to shape
             :obj:`[-1, in_channels * out_channels]`, *e.g.*, defined by
             :class:`torch.nn.Sequential`.
-        aggr (string, optional): The aggregation scheme to use
+        aggr (str, optional): The aggregation scheme to use
             (:obj:`"add"`, :obj:`"mean"`, :obj:`"max"`).
             (default: :obj:`"add"`)
         root_weight (bool, optional): If set to :obj:`False`, the layer will
@@ -47,11 +49,21 @@ class NNConv(MessagePassing):
             an additive bias. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})` or
+          :math:`((|\mathcal{V_s}|, F_{s}), (|\mathcal{V_t}|, F_{t}))`
+          if bipartite,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge features :math:`(|\mathcal{E}|, D)` *(optional)*
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})` or
+          :math:`(|\mathcal{V}_t|, F_{out})` if bipartite
     """
     def __init__(self, in_channels: Union[int, Tuple[int, int]],
                  out_channels: int, nn: Callable, aggr: str = 'add',
                  root_weight: bool = True, bias: bool = True, **kwargs):
-        super(NNConv, self).__init__(aggr=aggr, **kwargs)
+        super().__init__(aggr=aggr, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -68,33 +80,39 @@ class NNConv(MessagePassing):
                               weight_initializer='uniform')
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
+            self.bias = Parameter(torch.empty(out_channels))
         else:
             self.register_parameter('bias', None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         reset(self.nn)
         if self.root_weight:
             self.lin.reset_parameters()
         zeros(self.bias)
 
-    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
-                edge_attr: OptTensor = None, size: Size = None) -> Tensor:
-        """"""
+    def forward(
+        self,
+        x: Union[Tensor, OptPairTensor],
+        edge_index: Adj,
+        edge_attr: OptTensor = None,
+        size: Size = None,
+    ) -> Tensor:
+
         if isinstance(x, Tensor):
-            x: OptPairTensor = (x, x)
+            x = (x, x)
 
         # propagate_type: (x: OptPairTensor, edge_attr: OptTensor)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=size)
 
         x_r = x[1]
         if x_r is not None and self.root_weight:
-            out += self.lin(x_r)
+            out = out + self.lin(x_r)
 
         if self.bias is not None:
-            out += self.bias
+            out = out + self.bias
 
         return out
 
@@ -103,11 +121,6 @@ class NNConv(MessagePassing):
         weight = weight.view(-1, self.in_channels_l, self.out_channels)
         return torch.matmul(x_j.unsqueeze(1), weight).squeeze(1)
 
-    def __repr__(self):
-        return '{}({}, {}, aggr="{}", nn={})'.format(self.__class__.__name__,
-                                                     self.in_channels,
-                                                     self.out_channels,
-                                                     self.aggr, self.nn)
-
-
-ECConv = NNConv
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, aggr={self.aggr}, nn={self.nn})')

@@ -1,19 +1,20 @@
 import torch
 import torch.nn.functional as F
-from torch.nn import Linear, Conv1d
-from torch_geometric.nn import SAGEConv, global_sort_pool
+from torch.nn import Conv1d, Linear
+
+from torch_geometric.nn import SAGEConv, SortAggregation
 
 
 class SortPool(torch.nn.Module):
     def __init__(self, dataset, num_layers, hidden):
-        super(SortPool, self).__init__()
-        self.k = 30
+        super().__init__()
         self.conv1 = SAGEConv(dataset.num_features, hidden)
         self.convs = torch.nn.ModuleList()
         for i in range(num_layers - 1):
             self.convs.append(SAGEConv(hidden, hidden))
+        self.pool = SortAggregation(k=30)
         self.conv1d = Conv1d(hidden, 32, 5)
-        self.lin1 = Linear(32 * (self.k - 5 + 1), hidden)
+        self.lin1 = Linear(32 * (30 - 5 + 1), hidden)
         self.lin2 = Linear(hidden, dataset.num_classes)
 
     def reset_parameters(self):
@@ -29,7 +30,7 @@ class SortPool(torch.nn.Module):
         x = F.relu(self.conv1(x, edge_index))
         for conv in self.convs:
             x = F.relu(conv(x, edge_index))
-        x = global_sort_pool(x, batch, self.k)
+        x = self.pool(x, batch)
         x = x.view(len(x), self.k, -1).permute(0, 2, 1)
         x = F.relu(self.conv1d(x))
         x = x.view(len(x), -1)

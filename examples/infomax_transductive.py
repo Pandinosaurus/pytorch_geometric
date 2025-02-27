@@ -1,20 +1,20 @@
 import os.path as osp
 
 import torch
-import torch.nn as nn
+
 from torch_geometric.datasets import Planetoid
-from torch_geometric.nn import GCNConv, DeepGraphInfomax
+from torch_geometric.nn import DeepGraphInfomax, GCNConv
 
 dataset = 'Cora'
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)
 dataset = Planetoid(path, dataset)
 
 
-class Encoder(nn.Module):
+class Encoder(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels):
-        super(Encoder, self).__init__()
-        self.conv = GCNConv(in_channels, hidden_channels, cached=True)
-        self.prelu = nn.PReLU(hidden_channels)
+        super().__init__()
+        self.conv = GCNConv(in_channels, hidden_channels)
+        self.prelu = torch.nn.PReLU(hidden_channels)
 
     def forward(self, x, edge_index):
         x = self.conv(x, edge_index)
@@ -23,14 +23,22 @@ class Encoder(nn.Module):
 
 
 def corruption(x, edge_index):
-    return x[torch.randperm(x.size(0))], edge_index
+    return x[torch.randperm(x.size(0), device=x.device)], edge_index
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
 model = DeepGraphInfomax(
-    hidden_channels=512, encoder=Encoder(dataset.num_features, 512),
-    summary=lambda z, *args, **kwargs: torch.sigmoid(z.mean(dim=0)),
-    corruption=corruption).to(device)
+    hidden_channels=512,
+    encoder=Encoder(dataset.num_features, 512),
+    summary=lambda z, *args, **kwargs: z.mean(dim=0).sigmoid(),
+    corruption=corruption,
+).to(device)
 data = dataset[0].to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -55,6 +63,6 @@ def test():
 
 for epoch in range(1, 301):
     loss = train()
-    print('Epoch: {:03d}, Loss: {:.4f}'.format(epoch, loss))
+    print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}')
 acc = test()
-print('Accuracy: {:.4f}'.format(acc))
+print(f'Accuracy: {acc:.4f}')

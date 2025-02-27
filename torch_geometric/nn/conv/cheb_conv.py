@@ -1,20 +1,20 @@
 from typing import Optional
-from torch_geometric.typing import OptTensor
 
 import torch
+from torch import Tensor
 from torch.nn import Parameter
 
-from torch_geometric.nn.inits import zeros
-from torch_geometric.utils import get_laplacian
-from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.utils import remove_self_loops, add_self_loops
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import zeros
+from torch_geometric.typing import OptTensor
+from torch_geometric.utils import get_laplacian
 
 
 class ChebConv(MessagePassing):
     r"""The chebyshev spectral graph convolutional operator from the
     `"Convolutional Neural Networks on Graphs with Fast Localized Spectral
-    Filtering" <https://arxiv.org/abs/1606.09375>`_ paper
+    Filtering" <https://arxiv.org/abs/1606.09375>`_ paper.
 
     .. math::
         \mathbf{X}^{\prime} = \sum_{k=1}^{K} \mathbf{Z}^{(k)} \cdot
@@ -51,8 +51,6 @@ class ChebConv(MessagePassing):
             3. :obj:`"rw"`: Random-walk normalization
             :math:`\mathbf{L} = \mathbf{I} - \mathbf{D}^{-1} \mathbf{A}`
 
-            You need to pass :obj:`lambda_max` to the :meth:`forward` method of
-            this operator in case the normalization is non-symmetric.
             :obj:`\lambda_max` should be a :class:`torch.Tensor` of size
             :obj:`[num_graphs]` in a mini-batch scenario and a
             scalar/zero-dimensional tensor when operating on single graphs.
@@ -62,12 +60,27 @@ class ChebConv(MessagePassing):
             an additive bias. (default: :obj:`True`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})`,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge weights :math:`(|\mathcal{E}|)` *(optional)*,
+          batch vector :math:`(|\mathcal{V}|)` *(optional)*,
+          maximum :obj:`lambda` value :math:`(|\mathcal{G}|)` *(optional)*
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})`
     """
-    def __init__(self, in_channels: int, out_channels: int, K: int,
-                 normalization: Optional[str] = 'sym', bias: bool = True,
-                 **kwargs):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        K: int,
+        normalization: Optional[str] = 'sym',
+        bias: bool = True,
+        **kwargs,
+    ):
         kwargs.setdefault('aggr', 'add')
-        super(ChebConv, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         assert K > 0
         assert normalization in [None, 'sym', 'rw'], 'Invalid normalization'
@@ -81,27 +94,39 @@ class ChebConv(MessagePassing):
         ])
 
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
+            self.bias = Parameter(Tensor(out_channels))
         else:
             self.register_parameter('bias', None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         for lin in self.lins:
             lin.reset_parameters()
         zeros(self.bias)
 
-    def __norm__(self, edge_index, num_nodes: Optional[int],
-                 edge_weight: OptTensor, normalization: Optional[str],
-                 lambda_max, dtype: Optional[int] = None,
-                 batch: OptTensor = None):
-
-        edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
-
+    def __norm__(
+        self,
+        edge_index: Tensor,
+        num_nodes: Optional[int],
+        edge_weight: OptTensor,
+        normalization: Optional[str],
+        lambda_max: OptTensor = None,
+        dtype: Optional[int] = None,
+        batch: OptTensor = None,
+    ):
         edge_index, edge_weight = get_laplacian(edge_index, edge_weight,
                                                 normalization, dtype,
                                                 num_nodes)
+        assert edge_weight is not None
+
+        if lambda_max is None:
+            lambda_max = 2.0 * edge_weight.max()
+        elif not isinstance(lambda_max, Tensor):
+            lambda_max = torch.tensor(lambda_max, dtype=dtype,
+                                      device=edge_index.device)
+        assert lambda_max is not None
 
         if batch is not None and lambda_max.numel() > 1:
             lambda_max = lambda_max[batch[edge_index[0]]]
@@ -109,31 +134,29 @@ class ChebConv(MessagePassing):
         edge_weight = (2.0 * edge_weight) / lambda_max
         edge_weight.masked_fill_(edge_weight == float('inf'), 0)
 
-        edge_index, edge_weight = add_self_loops(edge_index, edge_weight,
-                                                 fill_value=-1.,
-                                                 num_nodes=num_nodes)
-        assert edge_weight is not None
+        loop_mask = edge_index[0] == edge_index[1]
+        edge_weight[loop_mask] -= 1
 
         return edge_index, edge_weight
 
-    def forward(self, x, edge_index, edge_weight: OptTensor = None,
-                batch: OptTensor = None, lambda_max: OptTensor = None):
-        """"""
-        if self.normalization != 'sym' and lambda_max is None:
-            raise ValueError('You need to pass `lambda_max` to `forward() in`'
-                             'case the normalization is non-symmetric.')
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        edge_weight: OptTensor = None,
+        batch: OptTensor = None,
+        lambda_max: OptTensor = None,
+    ) -> Tensor:
 
-        if lambda_max is None:
-            lambda_max = torch.tensor(2.0, dtype=x.dtype, device=x.device)
-        if not isinstance(lambda_max, torch.Tensor):
-            lambda_max = torch.tensor(lambda_max, dtype=x.dtype,
-                                      device=x.device)
-        assert lambda_max is not None
-
-        edge_index, norm = self.__norm__(edge_index, x.size(self.node_dim),
-                                         edge_weight, self.normalization,
-                                         lambda_max, dtype=x.dtype,
-                                         batch=batch)
+        edge_index, norm = self.__norm__(
+            edge_index,
+            x.size(self.node_dim),
+            edge_weight,
+            self.normalization,
+            lambda_max,
+            dtype=x.dtype,
+            batch=batch,
+        )
 
         Tx_0 = x
         Tx_1 = x  # Dummy.
@@ -141,24 +164,24 @@ class ChebConv(MessagePassing):
 
         # propagate_type: (x: Tensor, norm: Tensor)
         if len(self.lins) > 1:
-            Tx_1 = self.propagate(edge_index, x=x, norm=norm, size=None)
+            Tx_1 = self.propagate(edge_index, x=x, norm=norm)
             out = out + self.lins[1](Tx_1)
 
         for lin in self.lins[2:]:
-            Tx_2 = self.propagate(edge_index, x=Tx_1, norm=norm, size=None)
+            Tx_2 = self.propagate(edge_index, x=Tx_1, norm=norm)
             Tx_2 = 2. * Tx_2 - Tx_0
             out = out + lin.forward(Tx_2)
             Tx_0, Tx_1 = Tx_1, Tx_2
 
         if self.bias is not None:
-            out += self.bias
+            out = out + self.bias
 
         return out
 
-    def message(self, x_j, norm):
+    def message(self, x_j: Tensor, norm: Tensor) -> Tensor:
         return norm.view(-1, 1) * x_j
 
-    def __repr__(self):
-        return '{}({}, {}, K={}, normalization={})'.format(
-            self.__class__.__name__, self.in_channels, self.out_channels,
-            len(self.lins), self.normalization)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, K={len(self.lins)}, '
+                f'normalization={self.normalization})')

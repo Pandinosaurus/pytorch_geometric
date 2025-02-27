@@ -1,13 +1,14 @@
+import dgl.function as fn
 import torch
 import torch.nn.functional as F
 from torch.nn import Parameter as Param
+
 from torch_geometric.nn.inits import uniform
-import dgl.function as fn
 
 
 class RGCNConv(torch.nn.Module):
     def __init__(self, g, in_channels, out_channels, num_relations, num_bases):
-        super(RGCNConv, self).__init__()
+        super().__init__()
 
         self.g = g
         self.in_channels = in_channels
@@ -15,10 +16,10 @@ class RGCNConv(torch.nn.Module):
         self.num_relations = num_relations
         self.num_bases = num_bases
 
-        self.basis = Param(torch.Tensor(num_bases, in_channels, out_channels))
-        self.att = Param(torch.Tensor(num_relations, num_bases))
-        self.root = Param(torch.Tensor(in_channels, out_channels))
-        self.bias = Param(torch.Tensor(out_channels))
+        self.basis = Param(torch.empty(num_bases, in_channels, out_channels))
+        self.att = Param(torch.empty(num_relations, num_bases))
+        self.root = Param(torch.empty(in_channels, out_channels))
+        self.bias = Param(torch.empty(out_channels))
 
         self.reset_parameters()
 
@@ -67,7 +68,7 @@ class RGCNConv(torch.nn.Module):
 
 class RGCN(torch.nn.Module):
     def __init__(self, g, in_channels, out_channels, num_relations):
-        super(RGCN, self).__init__()
+        super().__init__()
         self.conv1 = RGCNConv(g, in_channels, 16, num_relations, num_bases=30)
         self.conv2 = RGCNConv(g, 16, out_channels, num_relations, num_bases=30)
 
@@ -79,7 +80,7 @@ class RGCN(torch.nn.Module):
 
 class RGCNSPMVConv(torch.nn.Module):
     def __init__(self, g, in_channels, out_channels, num_relations, num_bases):
-        super(RGCNSPMVConv, self).__init__()
+        super().__init__()
 
         self.g = g
         self.in_channels = in_channels
@@ -87,10 +88,10 @@ class RGCNSPMVConv(torch.nn.Module):
         self.num_relations = num_relations
         self.num_bases = num_bases
 
-        self.basis = Param(torch.Tensor(num_bases, in_channels, out_channels))
-        self.att = Param(torch.Tensor(num_relations, num_bases))
-        self.root = Param(torch.Tensor(in_channels, out_channels))
-        self.bias = Param(torch.Tensor(out_channels))
+        self.basis = Param(torch.empty(num_bases, in_channels, out_channels))
+        self.att = Param(torch.empty(num_relations, num_bases))
+        self.root = Param(torch.empty(in_channels, out_channels))
+        self.bias = Param(torch.empty(out_channels))
 
         self.reset_parameters()
 
@@ -136,11 +137,11 @@ class RGCNSPMVConv(torch.nn.Module):
 
 class RGCNSPMV(torch.nn.Module):
     def __init__(self, g, in_channels, out_channels, num_relations):
-        super(RGCNSPMV, self).__init__()
-        self.conv1 = RGCNSPMVConv(
-            g, in_channels, 16, num_relations, num_bases=30)
-        self.conv2 = RGCNSPMVConv(
-            g, 16, out_channels, num_relations, num_bases=30)
+        super().__init__()
+        self.conv1 = RGCNSPMVConv(g, in_channels, 16, num_relations,
+                                  num_bases=30)
+        self.conv2 = RGCNSPMVConv(g, 16, out_channels, num_relations,
+                                  num_bases=30)
 
     def forward(self, x):
         x = F.relu(self.conv1(None))

@@ -2,16 +2,16 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
+
+import torch_geometric
+import torch_geometric.transforms as T
 from torch_geometric.datasets import DBLP
-from torch_geometric.nn import Linear, HGTConv
+from torch_geometric.nn import HGTConv, Linear
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
-dataset = DBLP(path)
+# We initialize conference node features with a single one-vector as feature:
+dataset = DBLP(path, transform=T.Constant(node_types='conference'))
 data = dataset[0]
-print(data)
-
-# We initialize conference node features with a single feature.
-data['conference'].x = torch.ones(data['conference'].num_nodes, 1)
 
 
 class HGT(torch.nn.Module):
@@ -25,14 +25,16 @@ class HGT(torch.nn.Module):
         self.convs = torch.nn.ModuleList()
         for _ in range(num_layers):
             conv = HGTConv(hidden_channels, hidden_channels, data.metadata(),
-                           num_heads, group='sum')
+                           num_heads)
             self.convs.append(conv)
 
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, x_dict, edge_index_dict):
-        for node_type, x in x_dict.items():
-            x_dict[node_type] = self.lin_dict[node_type](x).relu_()
+        x_dict = {
+            node_type: self.lin_dict[node_type](x).relu_()
+            for node_type, x in x_dict.items()
+        }
 
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
@@ -41,7 +43,12 @@ class HGT(torch.nn.Module):
 
 
 model = HGT(hidden_channels=64, out_channels=4, num_heads=2, num_layers=1)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch_geometric.is_xpu_available():
+    device = torch.device('xpu')
+else:
+    device = torch.device('cpu')
 data, model = data.to(device), model.to(device)
 
 with torch.no_grad():  # Initialize lazy modules.

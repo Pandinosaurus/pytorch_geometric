@@ -2,16 +2,16 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
+
+import torch_geometric
+import torch_geometric.transforms as T
 from torch_geometric.datasets import DBLP
-from torch_geometric.nn import SAGEConv, HeteroConv, Linear
+from torch_geometric.nn import HeteroConv, Linear, SAGEConv
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
-dataset = DBLP(path)
+# We initialize conference node features with a single one-vector as feature:
+dataset = DBLP(path, transform=T.Constant(node_types='conference'))
 data = dataset[0]
-print(data)
-
-# We initialize conference node features with a single feature.
-data['conference'].x = torch.ones(data['conference'].num_nodes, 1)
 
 
 class HeteroGNN(torch.nn.Module):
@@ -37,7 +37,12 @@ class HeteroGNN(torch.nn.Module):
 
 model = HeteroGNN(data.metadata(), hidden_channels=64, out_channels=4,
                   num_layers=2)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch_geometric.is_xpu_available():
+    device = torch.device('xpu')
+else:
+    device = torch.device('cpu')
 data, model = data.to(device), model.to(device)
 
 with torch.no_grad():  # Initialize lazy modules.

@@ -1,15 +1,22 @@
 import os
 import os.path as osp
-import shutil
 from itertools import chain
+from typing import Callable, Dict, List, Optional
 from xml.dom import minidom
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 from torch.utils.data import DataLoader
-import numpy as np
-from torch_geometric.data import (InMemoryDataset, Data, download_url,
-                                  extract_tar)
+
+from torch_geometric.data import (
+    Data,
+    InMemoryDataset,
+    download_url,
+    extract_tar,
+)
+from torch_geometric.io import fs
 
 
 class PascalVOCKeypoints(InMemoryDataset):
@@ -24,8 +31,8 @@ class PascalVOCKeypoints(InMemoryDataset):
     on ImageNet (:obj:`relu4_2` and :obj:`relu5_1`).
 
     Args:
-        root (string): Root directory where the dataset should be saved.
-        category (string): The category of the images (one of
+        root (str): Root directory where the dataset should be saved.
+        category (str): The category of the images (one of
             :obj:`"Aeroplane"`, :obj:`"Bicycle"`, :obj:`"Bird"`,
             :obj:`"Boat"`, :obj:`"Bottle"`, :obj:`"Bus"`, :obj:`"Car"`,
             :obj:`"Cat"`, :obj:`"Chair"`, :obj:`"Diningtable"`, :obj:`"Dog"`,
@@ -46,6 +53,11 @@ class PascalVOCKeypoints(InMemoryDataset):
             :obj:`torch_geometric.data.Data` object and returns a boolean
             value, indicating whether the data object should be included in the
             final dataset. (default: :obj:`None`)
+        force_reload (bool, optional): Whether to re-process the dataset.
+            (default: :obj:`False`)
+        device (str or torch.device, optional): The device to use for
+            processing the raw data. If set to :obj:`None`, will utilize
+            GPU-processing if available. (default: :obj:`None`)
     """
     image_url = ('http://host.robots.ox.ac.uk/pascal/VOC/voc2011/'
                  'VOCtrainval_25-May-2011.tar')
@@ -62,41 +74,53 @@ class PascalVOCKeypoints(InMemoryDataset):
         'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'
     ]
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 32
 
-    def __init__(self, root, category, train=True, transform=None,
-                 pre_transform=None, pre_filter=None):
+    def __init__(
+        self,
+        root: str,
+        category: str,
+        train: bool = True,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+        force_reload: bool = False,
+        device: Optional[str] = None,
+    ) -> None:
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
         self.category = category.lower()
         assert self.category in self.categories
-        super(PascalVOCKeypoints, self).__init__(root, transform,
-                                                 pre_transform, pre_filter)
+        self.device = device
+        super().__init__(root, transform, pre_transform, pre_filter,
+                         force_reload=force_reload)
         path = self.processed_paths[0] if train else self.processed_paths[1]
-        self.data, self.slices = torch.load(path)
+        self.load(path)
 
     @property
-    def raw_dir(self):
+    def raw_dir(self) -> str:
         return osp.join(self.root, 'raw')
 
     @property
-    def processed_dir(self):
+    def processed_dir(self) -> str:
         return osp.join(self.root, self.category.capitalize(), 'processed')
 
     @property
-    def raw_file_names(self):
+    def raw_file_names(self) -> List[str]:
         return ['images', 'annotations', 'splits.npz']
 
     @property
-    def processed_file_names(self):
+    def processed_file_names(self) -> List[str]:
         return ['training.pt', 'test.pt']
 
-    def download(self):
+    def download(self) -> None:
         path = download_url(self.image_url, self.raw_dir)
         extract_tar(path, self.raw_dir, mode='r')
         os.unlink(path)
         image_path = osp.join(self.raw_dir, 'TrainVal', 'VOCdevkit', 'VOC2011')
         os.rename(image_path, osp.join(self.raw_dir, 'images'))
-        shutil.rmtree(osp.join(self.raw_dir, 'TrainVal'))
+        fs.rm(osp.join(self.raw_dir, 'TrainVal'))
 
         path = download_url(self.annotation_url, self.raw_dir)
         extract_tar(path, self.raw_dir, mode='r')
@@ -105,10 +129,10 @@ class PascalVOCKeypoints(InMemoryDataset):
         path = download_url(self.split_url, self.raw_dir)
         os.rename(path, osp.join(self.raw_dir, 'splits.npz'))
 
-    def process(self):
-        from PIL import Image
-        import torchvision.transforms as T
+    def process(self) -> None:
         import torchvision.models as models
+        import torchvision.transforms as T
+        from PIL import Image
 
         splits = np.load(osp.join(self.raw_dir, 'splits.npz'),
                          allow_pickle=True)
@@ -120,11 +144,11 @@ class PascalVOCKeypoints(InMemoryDataset):
         info_path = osp.join(self.raw_dir, 'images', 'Annotations')
         annotation_path = osp.join(self.raw_dir, 'annotations')
 
-        labels = {}
+        labels: Dict[str, int] = {}
 
         vgg16_outputs = []
 
-        def hook(module, x, y):
+        def hook(module: torch.nn.Module, x: Tensor, y: Tensor) -> None:
             vgg16_outputs.append(y)
 
         vgg16 = models.vgg16(pretrained=True).to(self.device)
@@ -140,15 +164,25 @@ class PascalVOCKeypoints(InMemoryDataset):
         train_set, test_set = [], []
         for i, name in enumerate(chain(train_split, test_split)):
             filename = '_'.join(name.split('/')[1].split('_')[:-1])
-            idx = int(name.split('_')[-1].split('.')[0]) - 1
+            file_idx = int(name.split('_')[-1].split('.')[0]) - 1
 
-            path = osp.join(info_path, '{}.xml'.format(filename))
-            obj = minidom.parse(path).getElementsByTagName('object')[idx]
+            path = osp.join(info_path, f'{filename}.xml')
+            obj = minidom.parse(path).getElementsByTagName('object')[file_idx]
 
-            trunc = obj.getElementsByTagName('truncated')[0].firstChild.data
-            occ = obj.getElementsByTagName('occluded')
-            occ = '0' if len(occ) == 0 else occ[0].firstChild.data
-            diff = obj.getElementsByTagName('difficult')[0].firstChild.data
+            child = obj.getElementsByTagName('truncated')[0].firstChild
+            assert child is not None
+            trunc = child.data  # type: ignore
+
+            elements = obj.getElementsByTagName('occluded')
+            if len(elements) == 0:
+                occ = '0'
+            else:
+                child = elements[0].firstChild
+                assert child is not None
+                occ = child.data  # type: ignore
+
+            child = obj.getElementsByTagName('difficult')[0].firstChild
+            diff = child.data  # type: ignore
 
             if bool(int(trunc)) or bool(int(occ)) or bool(int(diff)):
                 continue
@@ -156,10 +190,22 @@ class PascalVOCKeypoints(InMemoryDataset):
             if self.category == 'person' and int(filename[:4]) > 2008:
                 continue
 
-            xmin = float(obj.getElementsByTagName('xmin')[0].firstChild.data)
-            xmax = float(obj.getElementsByTagName('xmax')[0].firstChild.data)
-            ymin = float(obj.getElementsByTagName('ymin')[0].firstChild.data)
-            ymax = float(obj.getElementsByTagName('ymax')[0].firstChild.data)
+            child = obj.getElementsByTagName('xmin')[0].firstChild
+            assert child is not None
+            xmin = int(child.data)  # type: ignore
+
+            child = obj.getElementsByTagName('xmax')[0].firstChild
+            assert child is not None
+            xmax = int(child.data)  # type: ignore
+
+            child = obj.getElementsByTagName('ymin')[0].firstChild
+            assert child is not None
+            ymin = int(child.data)  # type: ignore
+
+            child = obj.getElementsByTagName('ymax')[0].firstChild
+            assert child is not None
+            ymax = int(child.data)  # type: ignore
+
             box = (xmin, ymin, xmax, ymax)
 
             dom = minidom.parse(osp.join(annotation_path, name))
@@ -170,9 +216,9 @@ class PascalVOCKeypoints(InMemoryDataset):
                 if label not in labels:
                     labels[label] = len(labels)
                 ys.append(labels[label])
-                x = float(keypoint.attributes['x'].value)
-                y = float(keypoint.attributes['y'].value)
-                poss += [x, y]
+                _x = float(keypoint.attributes['x'].value)
+                _y = float(keypoint.attributes['y'].value)
+                poss += [_x, _y]
             y = torch.tensor(ys, dtype=torch.long)
             pos = torch.tensor(poss, dtype=torch.float).view(-1, 2)
 
@@ -181,19 +227,21 @@ class PascalVOCKeypoints(InMemoryDataset):
 
             # Add a small offset to the bounding because some keypoints lay
             # outside the bounding box intervals.
-            box = (min(pos[:, 0].min().floor().item(), box[0]) - 16,
-                   min(pos[:, 1].min().floor().item(), box[1]) - 16,
-                   max(pos[:, 0].max().ceil().item(), box[2]) + 16,
-                   max(pos[:, 1].max().ceil().item(), box[3]) + 16)
+            box = (
+                min(int(pos[:, 0].min().floor()), box[0]) - 16,
+                min(int(pos[:, 1].min().floor()), box[1]) - 16,
+                max(int(pos[:, 0].max().ceil()), box[2]) + 16,
+                max(int(pos[:, 1].max().ceil()), box[3]) + 16,
+            )
 
             # Rescale keypoints.
             pos[:, 0] = (pos[:, 0] - box[0]) * 256.0 / (box[2] - box[0])
             pos[:, 1] = (pos[:, 1] - box[1]) * 256.0 / (box[3] - box[1])
 
-            path = osp.join(image_path, '{}.jpg'.format(filename))
+            path = osp.join(image_path, f'{filename}.jpg')
             with open(path, 'rb') as f:
                 img = Image.open(f).convert('RGB').crop(box)
-                img = img.resize((256, 256), resample=Image.BICUBIC)
+                img = img.resize((256, 256), resample=Image.Resampling.BICUBIC)
 
             img = transform(img)
 
@@ -206,7 +254,11 @@ class PascalVOCKeypoints(InMemoryDataset):
 
         data_list = list(chain(train_set, test_set))
         imgs = [data.img for data in data_list]
-        loader = DataLoader(imgs, self.batch_size, shuffle=False)
+        loader: DataLoader = DataLoader(
+            dataset=imgs,  # type: ignore
+            batch_size=self.batch_size,
+            shuffle=False,
+        )
         for i, batch_img in enumerate(loader):
             vgg16_outputs.clear()
 
@@ -220,6 +272,7 @@ class PascalVOCKeypoints(InMemoryDataset):
 
             for j in range(out1.size(0)):
                 data = data_list[i * self.batch_size + j]
+                assert data.pos is not None
                 idx = data.pos.round().long().clamp(0, 255)
                 x_1 = out1[j, :, idx[:, 1], idx[:, 0]].to('cpu')
                 x_2 = out2[j, :, idx[:, 1], idx[:, 0]].to('cpu')
@@ -236,9 +289,9 @@ class PascalVOCKeypoints(InMemoryDataset):
             train_set = [self.pre_transform(data) for data in train_set]
             test_set = [self.pre_transform(data) for data in test_set]
 
-        torch.save(self.collate(train_set), self.processed_paths[0])
-        torch.save(self.collate(test_set), self.processed_paths[1])
+        self.save(train_set, self.processed_paths[0])
+        self.save(test_set, self.processed_paths[1])
 
-    def __repr__(self):
-        return '{}({}, category={})'.format(self.__class__.__name__, len(self),
-                                            self.category)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({len(self)}, '
+                f'category={self.category})')

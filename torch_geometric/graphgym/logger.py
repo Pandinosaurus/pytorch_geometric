@@ -1,30 +1,25 @@
-import torch
+import logging
 import math
 import os
 import sys
-import logging
+import time
+from typing import Any, Dict, Optional
+
+import torch
+
+from torch_geometric.graphgym import register
 from torch_geometric.graphgym.config import cfg
-from torch_geometric.graphgym.utils.io import dict_to_json, dict_to_tb
-
-from sklearn.metrics import accuracy_score, precision_score, recall_score, \
-    f1_score, roc_auc_score, mean_absolute_error, mean_squared_error
-
+from torch_geometric.graphgym.imports import Callback, pl
 from torch_geometric.graphgym.utils.device import get_current_gpu_usage
-
-try:
-    from tensorboardX import SummaryWriter
-except ImportError:
-    SummaryWriter = None
+from torch_geometric.graphgym.utils.io import dict_to_json, dict_to_tb
 
 
 def set_printing():
-    """
-    Set up printing options
-
-    """
+    """Set up printing options."""
     logging.root.handlers = []
     logging_cfg = {'level': logging.INFO, 'format': '%(message)s'}
-    h_file = logging.FileHandler('{}/logging.log'.format(cfg.run_dir))
+    os.makedirs(cfg.run_dir, exist_ok=True)
+    h_file = logging.FileHandler(f'{cfg.run_dir}/logging.log')
     h_stdout = logging.StreamHandler(sys.stdout)
     if cfg.print == 'file':
         logging_cfg['handlers'] = [h_file]
@@ -37,7 +32,7 @@ def set_printing():
     logging.basicConfig(**logging_cfg)
 
 
-class Logger(object):
+class Logger:
     def __init__(self, name='train', task_type=None):
         self.name = name
         self.task_type = task_type
@@ -45,12 +40,10 @@ class Logger(object):
         self._epoch_total = cfg.optim.max_epoch
         self._time_total = 0  # won't be reset
 
-        self.out_dir = '{}/{}'.format(cfg.run_dir, name)
+        self.out_dir = f'{cfg.run_dir}/{name}'
         os.makedirs(self.out_dir, exist_ok=True)
         if cfg.tensorboard_each_run:
-            if SummaryWriter is None:
-                raise ImportError(
-                    'Tensorboard support requires `tensorboardX`.')
+            from tensorboardX import SummaryWriter
             self.tb_writer = SummaryWriter(self.out_dir)
 
         self.reset()
@@ -102,22 +95,38 @@ class Logger(object):
 
     # task properties
     def classification_binary(self):
+        from sklearn.metrics import (
+            accuracy_score,
+            f1_score,
+            precision_score,
+            recall_score,
+            roc_auc_score,
+        )
+
         true, pred_score = torch.cat(self._true), torch.cat(self._pred)
         pred_int = self._get_pred_int(pred_score)
+        try:
+            r_a_score = roc_auc_score(true, pred_score)
+        except ValueError:
+            r_a_score = 0.0
         return {
             'accuracy': round(accuracy_score(true, pred_int), cfg.round),
             'precision': round(precision_score(true, pred_int), cfg.round),
             'recall': round(recall_score(true, pred_int), cfg.round),
             'f1': round(f1_score(true, pred_int), cfg.round),
-            'auc': round(roc_auc_score(true, pred_score), cfg.round),
+            'auc': round(r_a_score, cfg.round),
         }
 
     def classification_multi(self):
+        from sklearn.metrics import accuracy_score
+
         true, pred_score = torch.cat(self._true), torch.cat(self._pred)
         pred_int = self._get_pred_int(pred_score)
         return {'accuracy': round(accuracy_score(true, pred_int), cfg.round)}
 
     def regression(self):
+        from sklearn.metrics import mean_absolute_error, mean_squared_error
+
         true, pred = torch.cat(self._true), torch.cat(self._pred)
         return {
             'mae':
@@ -160,14 +169,25 @@ class Logger(object):
     def write_epoch(self, cur_epoch):
         basic_stats = self.basic()
 
-        if self.task_type == 'regression':
-            task_stats = self.regression()
-        elif self.task_type == 'classification_binary':
-            task_stats = self.classification_binary()
-        elif self.task_type == 'classification_multi':
-            task_stats = self.classification_multi()
-        else:
-            raise ValueError('Task has to be regression or classification')
+        # Try to load customized metrics
+        task_stats = {}
+        for custom_metric in cfg.custom_metrics:
+            func = register.metric_dict.get(custom_metric)
+            if not func:
+                raise ValueError(
+                    f'Unknown custom metric function name: {custom_metric}')
+            custom_metric_score = func(self._true, self._pred, self.task_type)
+            task_stats[custom_metric] = custom_metric_score
+
+        if not task_stats:  # use default metrics if no matching custom metric
+            if self.task_type == 'regression':
+                task_stats = self.regression()
+            elif self.task_type == 'classification_binary':
+                task_stats = self.classification_binary()
+            elif self.task_type == 'classification_multi':
+                task_stats = self.classification_multi()
+            else:
+                raise ValueError('Task has to be regression or classification')
 
         epoch_stats = {'epoch': cur_epoch}
         eta_stats = {'eta': round(self.eta(cur_epoch), cfg.round)}
@@ -190,9 +210,9 @@ class Logger(object):
             }
 
         # print
-        logging.info('{}: {}'.format(self.name, stats))
+        logging.info(f'{self.name}: {stats}')
         # json
-        dict_to_json(stats, '{}/stats.json'.format(self.out_dir))
+        dict_to_json(stats, f'{self.out_dir}/stats.json')
         # tensorboard
         if cfg.tensorboard_each_run:
             dict_to_tb(stats, self.tb_writer, cur_epoch)
@@ -216,14 +236,129 @@ def infer_task():
 
 
 def create_logger():
-    """
-    Create logger for the experiment
-
-    Returns: List of logger objects
-
-    """
+    r"""Create logger for the experiment."""
     loggers = []
     names = ['train', 'val', 'test']
     for i, dataset in enumerate(range(cfg.share.num_splits)):
         loggers.append(Logger(name=names[i], task_type=infer_task()))
     return loggers
+
+
+class LoggerCallback(Callback):
+    def __init__(self):
+        self._logger = create_logger()
+        self._train_epoch_start_time = None
+        self._val_epoch_start_time = None
+        self._test_epoch_start_time = None
+
+    @property
+    def train_logger(self) -> Any:
+        return self._logger[0]
+
+    @property
+    def val_logger(self) -> Any:
+        return self._logger[1]
+
+    @property
+    def test_logger(self) -> Any:
+        return self._logger[2]
+
+    def close(self):
+        for logger in self._logger:
+            logger.close()
+
+    def _get_stats(
+        self,
+        epoch_start_time: int,
+        outputs: Dict[str, Any],
+        trainer: 'pl.Trainer',
+    ) -> Dict:
+        return dict(
+            true=outputs['true'].detach().cpu(),
+            pred=outputs['pred_score'].detach().cpu(),
+            loss=float(outputs['loss']),
+            lr=trainer.lr_scheduler_configs[0].scheduler.get_last_lr()[0],
+            time_used=time.time() - epoch_start_time,
+            params=cfg.params,
+        )
+
+    def on_train_epoch_start(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self._train_epoch_start_time = time.time()
+
+    def on_validation_epoch_start(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self._val_epoch_start_time = time.time()
+
+    def on_test_epoch_start(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self._test_epoch_start_time = time.time()
+
+    def on_train_batch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+        outputs: Dict[str, Any],
+        batch: Any,
+        batch_idx: int,
+        unused: int = 0,
+    ):
+        stats = self._get_stats(self._train_epoch_start_time, outputs, trainer)
+        self.train_logger.update_stats(**stats)
+
+    def on_validation_batch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+        outputs: Optional[Dict[str, Any]],
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ):
+        stats = self._get_stats(self._val_epoch_start_time, outputs, trainer)
+        self.val_logger.update_stats(**stats)
+
+    def on_test_batch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+        outputs: Optional[Dict[str, Any]],
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ):
+        stats = self._get_stats(self._test_epoch_start_time, outputs, trainer)
+        self.test_logger.update_stats(**stats)
+
+    def on_train_epoch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self.train_logger.write_epoch(trainer.current_epoch)
+
+    def on_validation_epoch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self.val_logger.write_epoch(trainer.current_epoch)
+
+    def on_test_epoch_end(
+        self,
+        trainer: 'pl.Trainer',
+        pl_module: 'pl.LightningModule',
+    ):
+        self.test_logger.write_epoch(trainer.current_epoch)
+
+    def on_fit_end(self, trainer, pl_module):
+        self.close()

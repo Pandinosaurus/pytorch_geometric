@@ -1,8 +1,9 @@
-from typing import List, Optional, Tuple, NamedTuple, Union, Callable
+from typing import Callable, List, NamedTuple, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
-from torch_sparse import SparseTensor
+
+from torch_geometric.typing import SparseTensor
 
 
 class EdgeIndex(NamedTuple):
@@ -71,21 +72,21 @@ class NeighborSampler(torch.utils.data.DataLoader):
         `examples/reddit.py
         <https://github.com/pyg-team/pytorch_geometric/blob/master/examples/
         reddit.py>`_ or
-        `examples/ogbn_products_sage.py
+        `examples/ogbn_train.py
         <https://github.com/pyg-team/pytorch_geometric/blob/master/examples/
-        ogbn_products_sage.py>`_.
+        ogbn_train.py>`_.
 
     Args:
         edge_index (Tensor or SparseTensor): A :obj:`torch.LongTensor` or a
-            :obj:`torch_sparse.SparseTensor` that defines the underlying graph
-            connectivity/message passing flow.
+            :class:`torch_sparse.SparseTensor` that defines the underlying
+            graph connectivity/message passing flow.
             :obj:`edge_index` holds the indices of a (sparse) symmetric
             adjacency matrix.
             If :obj:`edge_index` is of type :obj:`torch.LongTensor`, its shape
             must be defined as :obj:`[2, num_edges]`, where messages from nodes
             :obj:`edge_index[0]` are sent to nodes in :obj:`edge_index[1]`
             (in case :obj:`flow="source_to_target"`).
-            If :obj:`edge_index` is of type :obj:`torch_sparse.SparseTensor`,
+            If :obj:`edge_index` is of type :class:`torch_sparse.SparseTensor`,
             its sparse indices :obj:`(row, col)` should relate to
             :obj:`row = edge_index[1]` and :obj:`col = edge_index[0]`.
             The major difference between both formats is that we need to input
@@ -116,10 +117,11 @@ class NeighborSampler(torch.utils.data.DataLoader):
 
         edge_index = edge_index.to('cpu')
 
-        if 'collate_fn' in kwargs:
-            del kwargs['collate_fn']
+        # Remove for PyTorch Lightning:
+        kwargs.pop('dataset', None)
+        kwargs.pop('collate_fn', None)
 
-        # Save for Pytorch Lightning...
+        # Save for Pytorch Lightning < 1.6:
         self.edge_index = edge_index
         self.node_idx = node_idx
         self.num_nodes = num_nodes
@@ -160,7 +162,7 @@ class NeighborSampler(torch.utils.data.DataLoader):
         elif node_idx.dtype == torch.bool:
             node_idx = node_idx.nonzero(as_tuple=False).view(-1)
 
-        super(NeighborSampler, self).__init__(
+        super().__init__(
             node_idx.view(-1).tolist(), collate_fn=self.sample, **kwargs)
 
     def sample(self, batch):
@@ -190,5 +192,5 @@ class NeighborSampler(torch.utils.data.DataLoader):
         out = self.transform(*out) if self.transform is not None else out
         return out
 
-    def __repr__(self):
-        return '{}(sizes={})'.format(self.__class__.__name__, self.sizes)
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}(sizes={self.sizes})'

@@ -2,10 +2,15 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.datasets import FAUST
+
 import torch_geometric.transforms as T
+from torch_geometric.datasets import FAUST
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import SplineConv
+from torch_geometric.typing import WITH_TORCH_SPLINE_CONV
+
+if not WITH_TORCH_SPLINE_CONV:
+    quit("This example requires 'torch-spline-conv'")
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'FAUST')
 pre_transform = T.Compose([T.FaceToEdge(), T.Constant(value=1)])
@@ -18,7 +23,7 @@ d = train_dataset[0]
 
 class Net(torch.nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.conv1 = SplineConv(1, 32, dim=3, kernel_size=5, aggr='add')
         self.conv2 = SplineConv(32, 64, dim=3, kernel_size=5, aggr='add')
         self.conv3 = SplineConv(64, 64, dim=3, kernel_size=5, aggr='add')
@@ -74,4 +79,4 @@ def test():
 for epoch in range(1, 101):
     train(epoch)
     test_acc = test()
-    print('Epoch: {:02d}, Test: {:.4f}'.format(epoch, test_acc))
+    print(f'Epoch: {epoch:03d}, Test: {test_acc:.4f}')

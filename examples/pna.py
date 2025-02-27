@@ -2,13 +2,14 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch.nn import ModuleList, Embedding
-from torch.nn import Sequential, ReLU, Linear
+from torch.nn import Embedding, Linear, ModuleList, ReLU, Sequential
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch_geometric.utils import degree
+
+import torch_geometric
 from torch_geometric.datasets import ZINC
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import PNAConv, BatchNorm, global_add_pool
+from torch_geometric.nn import BatchNorm, PNAConv, global_add_pool
+from torch_geometric.utils import degree
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'ZINC')
 train_dataset = ZINC(path, subset=True, split='train')
@@ -19,8 +20,14 @@ train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=128)
 test_loader = DataLoader(test_dataset, batch_size=128)
 
-# Compute in-degree histogram over training data.
-deg = torch.zeros(5, dtype=torch.long)
+# Compute the maximum in-degree in the training data.
+max_degree = -1
+for data in train_dataset:
+    d = degree(data.edge_index[1], num_nodes=data.num_nodes, dtype=torch.long)
+    max_degree = max(max_degree, int(d.max()))
+
+# Compute the in-degree histogram tensor
+deg = torch.zeros(max_degree + 1, dtype=torch.long)
 for data in train_dataset:
     d = degree(data.edge_index[1], num_nodes=data.num_nodes, dtype=torch.long)
     deg += torch.bincount(d, minlength=deg.numel())
@@ -28,7 +35,7 @@ for data in train_dataset:
 
 class Net(torch.nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
 
         self.node_emb = Embedding(21, 75)
         self.edge_emb = Embedding(4, 50)
@@ -60,7 +67,12 @@ class Net(torch.nn.Module):
         return self.mlp(x)
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch_geometric.is_xpu_available():
+    device = torch.device('xpu')
+else:
+    device = torch.device('cpu')
 model = Net().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20,

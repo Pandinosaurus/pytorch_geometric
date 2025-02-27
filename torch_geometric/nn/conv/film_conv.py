@@ -1,20 +1,25 @@
 import copy
-from typing import Union, Tuple, Optional, Callable
-from torch_geometric.typing import PairTensor, Adj, OptTensor
+from typing import Callable, Optional, Tuple, Union
 
 from torch import Tensor
 from torch.nn import ModuleList, ReLU
-from torch_sparse import SparseTensor, masked_select_nnz
+
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
-
-from ..inits import reset
+from torch_geometric.nn.inits import reset
+from torch_geometric.typing import (
+    Adj,
+    OptTensor,
+    PairTensor,
+    SparseTensor,
+    torch_sparse,
+)
 
 
 class FiLMConv(MessagePassing):
     r"""The FiLM graph convolutional operator from the
     `"GNN-FiLM: Graph Neural Networks with Feature-wise Linear Modulation"
-    <https://arxiv.org/abs/1906.12192>`_ paper
+    <https://arxiv.org/abs/1906.12192>`_ paper.
 
     .. math::
         \mathbf{x}^{\prime}_i = \sum_{r \in \mathcal{R}}
@@ -47,11 +52,21 @@ class FiLMConv(MessagePassing):
             linear layer. (default: :obj:`None`)
         act (callable, optional): Activation function :math:`\sigma`.
             (default: :meth:`torch.nn.ReLU()`)
-        aggr (string, optional): The aggregation scheme to use
+        aggr (str, optional): The aggregation scheme to use
             (:obj:`"add"`, :obj:`"mean"`, :obj:`"max"`).
             (default: :obj:`"mean"`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})` or
+          :math:`((|\mathcal{V_s}|, F_{s}), (|\mathcal{V_t}|, F_{t}))`
+          if bipartite,
+          edge indices :math:`(2, |\mathcal{E}|)`,
+          edge types :math:`(|\mathcal{E}|)`
+        - **output:** node features :math:`(|\mathcal{V}|, F_{out})` or
+          :math:`(|\mathcal{V_t}|, F_{out})` if bipartite
     """
     def __init__(
             self,
@@ -63,7 +78,7 @@ class FiLMConv(MessagePassing):
             aggr: str = 'mean',
             **kwargs,
     ):
-        super(FiLMConv, self).__init__(aggr=aggr, **kwargs)
+        super().__init__(aggr=aggr, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -93,17 +108,22 @@ class FiLMConv(MessagePassing):
         self.reset_parameters()
 
     def reset_parameters(self):
+        super().reset_parameters()
         for lin, film in zip(self.lins, self.films):
             lin.reset_parameters()
             reset(film)
         self.lin_skip.reset_parameters()
         reset(self.film_skip)
 
-    def forward(self, x: Union[Tensor, PairTensor], edge_index: Adj,
-                edge_type: OptTensor = None) -> Tensor:
-        """"""
+    def forward(
+        self,
+        x: Union[Tensor, PairTensor],
+        edge_index: Adj,
+        edge_type: OptTensor = None,
+    ) -> Tensor:
+
         if isinstance(x, Tensor):
-            x: PairTensor = (x, x)
+            x = (x, x)
 
         beta, gamma = self.film_skip(x[1]).split(self.out_channels, dim=-1)
         out = gamma * self.lin_skip(x[1]) + beta
@@ -113,23 +133,24 @@ class FiLMConv(MessagePassing):
         # propagate_type: (x: Tensor, beta: Tensor, gamma: Tensor)
         if self.num_relations <= 1:
             beta, gamma = self.films[0](x[1]).split(self.out_channels, dim=-1)
-            out += self.propagate(edge_index, x=self.lins[0](x[0]), beta=beta,
-                                  gamma=gamma, size=None)
+            out = out + self.propagate(edge_index, x=self.lins[0](x[0]),
+                                       beta=beta, gamma=gamma)
         else:
             for i, (lin, film) in enumerate(zip(self.lins, self.films)):
                 beta, gamma = film(x[1]).split(self.out_channels, dim=-1)
                 if isinstance(edge_index, SparseTensor):
-                    edge_type = edge_index.storage.value()
-                    assert edge_type is not None
-                    mask = edge_type == i
-                    out += self.propagate(
-                        masked_select_nnz(edge_index, mask, layout='coo'),
-                        x=lin(x[0]), beta=beta, gamma=gamma, size=None)
+                    _edge_type = edge_index.storage.value()
+                    assert _edge_type is not None
+                    mask = _edge_type == i
+                    adj_t = torch_sparse.masked_select_nnz(
+                        edge_index, mask, layout='coo')
+                    out = out + self.propagate(adj_t, x=lin(x[0]), beta=beta,
+                                               gamma=gamma)
                 else:
                     assert edge_type is not None
                     mask = edge_type == i
-                    out += self.propagate(edge_index[:, mask], x=lin(x[0]),
-                                          beta=beta, gamma=gamma, size=None)
+                    out = out + self.propagate(edge_index[:, mask], x=lin(
+                        x[0]), beta=beta, gamma=gamma)
 
         return out
 
@@ -139,8 +160,6 @@ class FiLMConv(MessagePassing):
             out = self.act(out)
         return out
 
-    def __repr__(self):
-        return '{}({}, {}, num_relations={})'.format(self.__class__.__name__,
-                                                     self.in_channels,
-                                                     self.out_channels,
-                                                     self.num_relations)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, num_relations={self.num_relations})')

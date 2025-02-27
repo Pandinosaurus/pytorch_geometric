@@ -3,6 +3,7 @@ import os.path as osp
 import torch
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedKFold
+
 from torch_geometric.datasets import Planetoid
 from torch_geometric.nn import DNAConv
 
@@ -26,21 +27,15 @@ data = gen_uniform_20_20_60_split(data)
 
 
 class Net(torch.nn.Module):
-    def __init__(self,
-                 in_channels,
-                 hidden_channels,
-                 out_channels,
-                 num_layers,
-                 heads=1,
-                 groups=1):
-        super(Net, self).__init__()
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers,
+                 heads=1, groups=1):
+        super().__init__()
         self.hidden_channels = hidden_channels
         self.lin1 = torch.nn.Linear(in_channels, hidden_channels)
         self.convs = torch.nn.ModuleList()
         for i in range(num_layers):
             self.convs.append(
-                DNAConv(
-                    hidden_channels, heads, groups, dropout=0.8, cached=True))
+                DNAConv(hidden_channels, heads, groups, dropout=0.8))
         self.lin2 = torch.nn.Linear(hidden_channels, out_channels)
 
     def reset_parameters(self):
@@ -63,14 +58,15 @@ class Net(torch.nn.Module):
         return torch.log_softmax(x, dim=1)
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = Net(
-    in_channels=dataset.num_features,
-    hidden_channels=128,
-    out_channels=dataset.num_classes,
-    num_layers=5,
-    heads=8,
-    groups=16)
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
+model = Net(in_channels=dataset.num_features, hidden_channels=128,
+            out_channels=dataset.num_classes, num_layers=5, heads=8, groups=16)
 model, data = model.to(device), data.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=0.0005)
 
@@ -84,11 +80,12 @@ def train():
     optimizer.step()
 
 
+@torch.no_grad()
 def test():
     model.eval()
-    logits, accs = model(data.x, data.edge_index), []
+    out, accs = model(data.x, data.edge_index), []
     for _, idx in data('train_idx', 'val_idx', 'test_idx'):
-        pred = logits[idx].max(1)[1]
+        pred = out[idx].argmax(1)
         acc = pred.eq(data.y[idx]).sum().item() / idx.numel()
         accs.append(acc)
     return accs
@@ -101,5 +98,5 @@ for epoch in range(1, 201):
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         test_acc = tmp_test_acc
-    log = 'Epoch: {:03d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}'
-    print(log.format(epoch, train_acc, best_val_acc, test_acc))
+    print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, '
+          f'Val: {best_val_acc:.4f}, Test: {test_acc:.4f}')

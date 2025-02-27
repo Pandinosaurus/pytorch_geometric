@@ -1,36 +1,55 @@
+from typing import Optional, Tuple
+
 import torch
 
+from torch_geometric.data import Data
+from torch_geometric.data.datapipes import functional_transform
 from torch_geometric.transforms import BaseTransform
 
 
+@functional_transform('cartesian')
 class Cartesian(BaseTransform):
     r"""Saves the relative Cartesian coordinates of linked nodes in its edge
-    attributes.
+    attributes (functional name: :obj:`cartesian`). Each coordinate gets
+    globally normalized to a specified interval (:math:`[0, 1]` by default).
 
     Args:
         norm (bool, optional): If set to :obj:`False`, the output will not be
-            normalized to the interval :math:`{[0, 1]}^D`.
-            (default: :obj:`True`)
+            normalized. (default: :obj:`True`)
         max_value (float, optional): If set and :obj:`norm=True`, normalization
             will be performed based on this value instead of the maximum value
             found in the data. (default: :obj:`None`)
         cat (bool, optional): If set to :obj:`False`, all existing edge
             attributes will be replaced. (default: :obj:`True`)
+        interval ((float, float), optional): A tuple specifying the lower and
+            upper bound for normalization. (default: :obj:`(0.0, 1.0)`)
     """
-    def __init__(self, norm=True, max_value=None, cat=True):
+    def __init__(
+            self,
+            norm: bool = True,
+            max_value: Optional[float] = None,
+            cat: bool = True,
+            interval: Tuple[float, float] = (0.0, 1.0),
+    ):
         self.norm = norm
         self.max = max_value
         self.cat = cat
+        self.interval = interval
 
-    def __call__(self, data):
+    def forward(self, data: Data) -> Data:
+        assert data.pos is not None
+        assert data.edge_index is not None
         (row, col), pos, pseudo = data.edge_index, data.pos, data.edge_attr
 
         cart = pos[row] - pos[col]
         cart = cart.view(-1, 1) if cart.dim() == 1 else cart
 
         if self.norm and cart.numel() > 0:
-            max_value = cart.abs().max() if self.max is None else self.max
-            cart = cart / (2 * max_value) + 0.5
+            max_val = float(cart.abs().max()) if self.max is None else self.max
+
+            length = self.interval[1] - self.interval[0]
+            center = (self.interval[0] + self.interval[1]) / 2
+            cart = length * cart / (2 * max_val) + center
 
         if pseudo is not None and self.cat:
             pseudo = pseudo.view(-1, 1) if pseudo.dim() == 1 else pseudo
@@ -40,6 +59,6 @@ class Cartesian(BaseTransform):
 
         return data
 
-    def __repr__(self):
-        return '{}(norm={}, max_value={})'.format(self.__class__.__name__,
-                                                  self.norm, self.max)
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}(norm={self.norm}, '
+                f'max_value={self.max})')

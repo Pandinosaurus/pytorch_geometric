@@ -1,13 +1,14 @@
 import torch
-from torch_geometric.transforms import RandomRotate
+
 from torch_geometric.data import Data
+from torch_geometric.transforms import RandomRotate
 
 
 def test_random_rotate():
-    assert RandomRotate([-180, 180]).__repr__() == ('RandomRotate('
-                                                    '[-180, 180], axis=0)')
+    assert str(RandomRotate([-180, 180])) == ('RandomRotate('
+                                              '[-180, 180], axis=0)')
 
-    pos = torch.Tensor([[-1, -1], [-1, 1], [1, -1], [1, 1]])
+    pos = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
 
     data = Data(pos=pos)
     data = RandomRotate(0)(data)
@@ -19,7 +20,12 @@ def test_random_rotate():
     assert len(data) == 1
     assert data.pos.tolist() == [[1, 1], [1, -1], [-1, 1], [-1, -1]]
 
-    pos = torch.Tensor([[-1, -1, 1], [-1, 1, 1], [1, -1, -1], [1, 1, -1]])
+    pos = torch.tensor([
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+    ])
 
     data = Data(pos=pos)
     data = RandomRotate([180, 180], axis=0)(data)

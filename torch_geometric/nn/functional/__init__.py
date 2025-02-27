@@ -1,9 +1,9 @@
+r"""Functional operator package."""
+
 from .bro import bro
 from .gini import gini
 
-__all__ = [
+__all__ = classes = [
     'bro',
-    'gini'
+    'gini',
 ]
-
-classes = __all__

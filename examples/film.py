@@ -2,11 +2,12 @@ import os.path as osp
 
 import torch
 import torch.nn.functional as F
-from torch.nn import BatchNorm1d
 from sklearn.metrics import f1_score
-from torch_geometric.nn import FiLMConv
+from torch.nn import BatchNorm1d
+
 from torch_geometric.datasets import PPI
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import FiLMConv
 
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'PPI')
 train_dataset = PPI(path, split='train')
@@ -20,7 +21,7 @@ test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False)
 class Net(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers,
                  dropout=0.0):
-        super(Net, self).__init__()
+        super().__init__()
         self.dropout = dropout
 
         self.convs = torch.nn.ModuleList()
@@ -41,7 +42,13 @@ class Net(torch.nn.Module):
         return x
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
 model = Net(in_channels=train_dataset.num_features, hidden_channels=320,
             out_channels=train_dataset.num_classes, num_layers=4,
             dropout=0.1).to(device)
@@ -81,5 +88,5 @@ for epoch in range(1, 501):
     loss = train()
     val_f1 = test(val_loader)
     test_f1 = test(test_loader)
-    print('Epoch: {:02d}, Loss: {:.4f}, Val: {:.4f}, Test: {:.4f}'.format(
-        epoch, loss, val_f1, test_f1))
+    print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Val: {val_f1:.4f}, '
+          f'Test: {test_f1:.4f}')

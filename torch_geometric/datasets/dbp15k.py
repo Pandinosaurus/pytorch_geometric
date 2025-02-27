@@ -1,13 +1,17 @@
-from typing import Optional, Callable, List, Dict, Tuple
-
 import os
 import os.path as osp
-import shutil
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
-from torch_geometric.data import Data, InMemoryDataset, extract_zip
-from torch_geometric.io import read_txt_array
+
+from torch_geometric.data import (
+    Data,
+    InMemoryDataset,
+    download_google_url,
+    extract_zip,
+)
+from torch_geometric.io import fs, read_txt_array
 from torch_geometric.utils import sort_edge_index
 
 
@@ -21,8 +25,8 @@ class DBP15K(InMemoryDataset):
     Matching Neural Network" <https://arxiv.org/abs/1905.11605>`_ paper.
 
     Args:
-        root (string): Root directory where the dataset should be saved.
-        pair (string): The pair of languages (:obj:`"en_zh"`, :obj:`"en_fr"`,
+        root (str): Root directory where the dataset should be saved.
+        pair (str): The pair of languages (:obj:`"en_zh"`, :obj:`"en_fr"`,
             :obj:`"en_ja"`, :obj:`"zh_en"`, :obj:`"fr_en"`, :obj:`"ja_en"`).
         transform (callable, optional): A function/transform that takes in an
             :obj:`torch_geometric.data.Data` object and returns a transformed
@@ -32,17 +36,24 @@ class DBP15K(InMemoryDataset):
             an :obj:`torch_geometric.data.Data` object and returns a
             transformed version. The data object will be transformed before
             being saved to disk. (default: :obj:`None`)
+        force_reload (bool, optional): Whether to re-process the dataset.
+            (default: :obj:`False`)
     """
+    file_id = '1ggYlYf2_kTyi7oF9g07oTNn3VDhjl7so'
 
-    file_id = '1dYJtj1_J4nYJdrDY95ucGLCuZXDXI7PL'
-
-    def __init__(self, root: str, pair: str,
-                 transform: Optional[Callable] = None,
-                 pre_transform: Optional[Callable] = None):
+    def __init__(
+        self,
+        root: str,
+        pair: str,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        force_reload: bool = False,
+    ) -> None:
         assert pair in ['en_zh', 'en_fr', 'en_ja', 'zh_en', 'fr_en', 'ja_en']
         self.pair = pair
-        super().__init__(root, transform, pre_transform)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        super().__init__(root, transform, pre_transform,
+                         force_reload=force_reload)
+        self.load(self.processed_paths[0])
 
     @property
     def raw_file_names(self) -> List[str]:
@@ -52,19 +63,16 @@ class DBP15K(InMemoryDataset):
     def processed_file_names(self) -> str:
         return f'{self.pair}.pt'
 
-    def download(self):
-        from google_drive_downloader import GoogleDriveDownloader as gdd
-
-        path = osp.join(self.root, 'raw.zip')
-        gdd.download_file_from_google_drive(self.file_id, path)
+    def download(self) -> None:
+        path = download_google_url(self.file_id, self.root, 'data.zip')
         extract_zip(path, self.root)
         os.unlink(path)
-        shutil.rmtree(self.raw_dir)
+        fs.rm(self.raw_dir)
         os.rename(osp.join(self.root, 'DBP15K'), self.raw_dir)
 
-    def process(self):
+    def process(self) -> None:
         embs = {}
-        with open(osp.join(self.raw_dir, 'sub.glove.300d'), 'r') as f:
+        with open(osp.join(self.raw_dir, 'sub.glove.300d')) as f:
             for i, line in enumerate(f):
                 info = line.strip().split(' ')
                 if len(info) > 300:
@@ -91,7 +99,7 @@ class DBP15K(InMemoryDataset):
         data = Data(x1=x1, edge_index1=edge_index1, rel1=rel1, x2=x2,
                     edge_index2=edge_index2, rel2=rel2, train_y=train_y,
                     test_y=test_y)
-        torch.save(self.collate([data]), self.processed_paths[0])
+        self.save([data], self.processed_paths[0])
 
     def process_graph(
         self,
@@ -104,7 +112,7 @@ class DBP15K(InMemoryDataset):
         subj, rel, obj = g1.t()
 
         x_dict = {}
-        with open(feature_path, 'r') as f:
+        with open(feature_path) as f:
             for line in f:
                 info = line.strip().split('\t')
                 info = info if len(info) == 2 else info + ['**UNK**']
@@ -113,14 +121,14 @@ class DBP15K(InMemoryDataset):
                 x_dict[int(info[0])] = torch.stack(hs, dim=0)
 
         idx = torch.tensor(list(x_dict.keys()))
-        assoc = torch.full((idx.max().item() + 1, ), -1, dtype=torch.long)
+        assoc = torch.full((int(idx.max()) + 1, ), -1, dtype=torch.long)
         assoc[idx] = torch.arange(idx.size(0))
 
         subj, obj = assoc[subj], assoc[obj]
         edge_index = torch.stack([subj, obj], dim=0)
         edge_index, rel = sort_edge_index(edge_index, rel)
 
-        xs = [None for _ in range(idx.size(0))]
+        xs = list(x_dict.values())
         for i in x_dict.keys():
             xs[assoc[i]] = x_dict[i]
         x = torch.nn.utils.rnn.pad_sequence(xs, batch_first=True)

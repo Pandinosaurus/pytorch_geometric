@@ -2,12 +2,19 @@ import time
 
 import torch
 import torch.nn.functional as F
+from sklearn.model_selection import StratifiedKFold
 from torch import tensor
 from torch.optim import Adam
-from sklearn.model_selection import StratifiedKFold
-from torch_geometric.loader import DataLoader, DenseDataLoader as DenseLoader
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DenseDataLoader as DenseLoader
+
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 
 
 def cross_validation_with_val_set(dataset, model, folds, epochs, batch_size,
@@ -36,6 +43,12 @@ def cross_validation_with_val_set(dataset, model, folds, epochs, batch_size,
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif hasattr(torch.backends,
+                     'mps') and torch.backends.mps.is_available():
+            try:
+                torch.mps.synchronize()
+            except ImportError:
+                pass
 
         t_start = time.perf_counter()
 
@@ -60,6 +73,9 @@ def cross_validation_with_val_set(dataset, model, folds, epochs, batch_size,
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif hasattr(torch.backends,
+                     'mps') and torch.backends.mps.is_available():
+            torch.mps.synchronize()
 
         t_end = time.perf_counter()
         durations.append(t_end - t_start)
@@ -73,8 +89,8 @@ def cross_validation_with_val_set(dataset, model, folds, epochs, batch_size,
     acc_mean = acc.mean().item()
     acc_std = acc.std().item()
     duration_mean = duration.mean().item()
-    print('Val Loss: {:.4f}, Test Accuracy: {:.3f} ± {:.3f}, Duration: {:.3f}'.
-          format(loss_mean, acc_mean, acc_std, duration_mean))
+    print(f'Val Loss: {loss_mean:.4f}, Test Accuracy: {acc_mean:.3f} '
+          f'± {acc_std:.3f}, Duration: {duration_mean:.3f}')
 
     return loss_mean, acc_mean, acc_std
 
@@ -141,3 +157,13 @@ def eval_loss(model, loader):
             out = model(data)
         loss += F.nll_loss(out, data.y.view(-1), reduction='sum').item()
     return loss / len(loader.dataset)
+
+
+@torch.no_grad()
+def inference_run(model, loader, bf16):
+    model.eval()
+    for data in loader:
+        data = data.to(device)
+        if bf16:
+            data.x = data.x.to(torch.bfloat16)
+        model(data)

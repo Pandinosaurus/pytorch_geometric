@@ -1,12 +1,18 @@
 __pycache__/
+.pytest_cache/
+.DS_Store
 data/
 build/
 dist/
 alpha/
 runs/
+wandb/
 .cache/
 .eggs/
 lightning_logs/
+outputs/
+graphgym/datasets/
+graphgym/results/
 *.egg-info/
 .ipynb_checkpoints
 .coverage
@@ -17,6 +23,11 @@ coverage.xml
 .venv
 *.out
 *.pt
+*.onnx
+examples/**/*.png
+examples/**/*.pdf
+benchmark/results/
+.mypy_cache/
 
 !torch_geometric/data/
 !test/data/

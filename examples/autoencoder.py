@@ -1,10 +1,12 @@
-import os.path as osp
-
 import argparse
+import os.path as osp
+import time
+
 import torch
-from torch_geometric.datasets import Planetoid
+
 import torch_geometric.transforms as T
-from torch_geometric.nn import GCNConv, GAE, VGAE
+from torch_geometric.datasets import Planetoid
+from torch_geometric.nn import GAE, VGAE, GCNConv
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--variational', action='store_true')
@@ -14,7 +16,13 @@ parser.add_argument('--dataset', type=str, default='Cora',
 parser.add_argument('--epochs', type=int, default=400)
 args = parser.parse_args()
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
 transform = T.Compose([
     T.NormalizeFeatures(),
     T.ToDevice(device),
@@ -75,9 +83,9 @@ if not args.variational and not args.linear:
 elif not args.variational and args.linear:
     model = GAE(LinearEncoder(in_channels, out_channels))
 elif args.variational and not args.linear:
-    model = VGAE(VariationalLinearEncoder(in_channels, out_channels))
-elif args.variational and args.linear:
     model = VGAE(VariationalGCNEncoder(in_channels, out_channels))
+elif args.variational and args.linear:
+    model = VGAE(VariationalLinearEncoder(in_channels, out_channels))
 
 model = model.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -102,7 +110,11 @@ def test(data):
     return model.test(z, data.pos_edge_label_index, data.neg_edge_label_index)
 
 
+times = []
 for epoch in range(1, args.epochs + 1):
+    start = time.time()
     loss = train()
     auc, ap = test(test_data)
-    print('Epoch: {:03d}, AUC: {:.4f}, AP: {:.4f}'.format(epoch, auc, ap))
+    print(f'Epoch: {epoch:03d}, AUC: {auc:.4f}, AP: {ap:.4f}')
+    times.append(time.time() - start)
+print(f"Median time per epoch: {torch.tensor(times).median():.4f}s")
